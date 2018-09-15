@@ -1,0 +1,3452 @@
+#packages needed along with dependencies
+library(tidyverse)
+library(rethinking)
+library(brms)
+library(plyr)
+library(data.table)
+library(Hmisc)
+library(gridExtra)
+#edit this to fit your own working directory
+setwd("C:/Users/Eric/Desktop/Within_Species")
+#bring in dataset from Weinert et al. 2017 and save to the working directory
+Appendix1<- read.csv("weinertdatabase.csv")
+Appendix1$Class <- as.character(Appendix1$Class)
+Appendix1$Class <- capitalize(Appendix1$Class)
+Appendix1$Bacterium <- as.character(Appendix1$Bacterium)
+Appendix1$Bacterium <- capitalize(Appendix1$Bacterium)
+Appendix1$spp <- as.character(Appendix1$spp)
+Appendix1$Order <- as.character(Appendix1$Order)
+Appendix1$Order <- capitalize(Appendix1$Order)
+#now to get just the insects
+Appendix1<- subset(Appendix1, Appendix1$Class == "Insecta",
+                   select = c(Class,Order, Family, Genus, Species,
+                              Total, Infected,Bacterium))
+#make sure its a data frame
+Appendix1 <- as.data.frame(Appendix1)
+#make a local df for viewing purposes
+Appendix1 <- tbl_df(Appendix1)
+#This is new after 08/06/18
+#separate out specimens that don't have genus or species labeled
+Appendix1unid <- subset(Appendix1,
+                        Appendix1$Genus == "Unid.",
+                        select = c(Class,Order, Family, Genus, Species,
+                                   Total, Infected,Bacterium))
+
+#remove the ones that are unidentified families
+Appendix1unid <- filter(Appendix1unid, Family != "Unid.")
+#create new column for unid. genera with families
+Appendix1unid$spp <- with(Appendix1unid,paste0(Family,Genus,Species))
+#filter out unidentified genera from the original db since
+#i'll be bringing those back in
+Appendix1 <- filter(Appendix1, Genus != "Unid.")
+#create new column of genusspecies
+Appendix1$spp <- with(Appendix1,paste0(Genus,Species))
+m <- list(Appendix1,Appendix1unid)
+Appendix1 <- rbindlist(m,use.names=TRUE)
+
+#Sometimes this has to be run twice, not sure why
+Sazama <- read_csv("https://knb.ecoinformatics.org/knb/d1/mn/v2/object/knb.1232.1")
+Sazama <- as.data.frame(Sazama)
+#sort out samples that were added from weinert database (sazama,
+#sontowski,and wiwatanaratanabutr)
+Sazama1<- subset(Sazama, Sazama$Paper == "Sazama",
+                 select = c(Class,Order, Family, Genus, Species,
+                            spp, Total, Infected,Bacterium))
+Sazama2 <- subset(Sazama, Sazama$Paper == "Sontowski2015",
+                  select = c(Class,Order, Family, Genus, Species,
+                             spp, Total, Infected,Bacterium))
+Sazama3 <- subset(Sazama, Sazama$Paper == "Wiwatanaratanabutr16",
+                  select = c(Class,Order, Family, Genus, Species,
+                             spp, Total, Infected,Bacterium))
+l = list(Appendix1,Sazama1,Sazama2,Sazama3)
+Appendix1 <- rbindlist(l,use.names=TRUE)
+#Now to get wolbachia groups
+#Wolbachia
+Appendix1wol<- subset(Appendix1, Appendix1$Bacterium == "Wolbachia",
+                      select = c(Class,Order, Family, Genus, Species,
+                                 spp, Total, Infected,Bacterium))
+#remove duplicates in the database
+#Wolbachia
+Appendix1.1w <- Appendix1wol %>%
+  group_by(spp) %>%
+  summarise_each(funs(sum),Total,Infected)
+Appendix1.1w$spp <- as.vector(Appendix1.1w$spp)
+#creating a second table of the same data to join to for the lost
+#information
+#Removing these columns since I don't need them
+Appendix2w <- Appendix1wol
+#creating a table of just the names so i can join them back
+Appendix2w$Total <- NULL
+Appendix2w$Infected <- NULL
+#joins the two tables so that it's all in one table
+#wolbachia
+App1w <- join(Appendix1.1w,Appendix2w,by="spp",type="left",
+              match="first")
+#sorts by spp to help with analysis later
+App1w <- App1w %>%
+  select(spp,Class,Order,Family,
+         Genus,Species,Total,Infected,Bacterium) %>%
+  arrange(spp)
+App1w$Order <- as.character(App1w$Order)
+App1w$Order <- capitalize(App1w$Order)
+#Make Total and Infected integers for the model
+App1w$Total <- as.integer(App1w$Total)
+App1w$Infected <- as.integer(App1w$Infected)
+App1w<-as.data.frame(App1w)
+###############################################
+#Now to do the model
+###############################################
+#do the model 
+model1w <- map2stan(
+  alist(
+    Infected ~ dbinom(Total, p) ,
+    logit(p) <- a_spp[spp] ,
+    a_spp[spp] ~ dnorm(a,sigma), 
+    a ~ dnorm(0,1) ,
+    sigma ~ dcauchy(0,1)
+  ), data=App1w, iter=4000,chains=4)
+summary(model1w)
+#extract samples into a database
+postbothw <- extract.samples(model1w)
+#find the mean of the samples
+App1w$propinf <- logistic(apply(postbothw$a_spp, 2, mean))
+#Find the 95% credible intervals
+bothPI.estw <- logistic(apply(postbothw$a_spp, 2, quantile,
+                              probs=c(0.025,0.975)))
+#transpose so that the rows become columns
+bothPI.estw <- t(bothPI.estw)
+#Make into a dataframe so that we can add to the other dataframe
+bothPI.estw <- as.data.frame(bothPI.estw)
+#Add to App1w
+App1w$`0.03` <- bothPI.estw[,1]
+App1w$`0.98` <- bothPI.estw[,2]
+App1w$Distancebetween <- App1w$`0.98` - App1w$`0.03`
+################################################
+########Now for the Figures#####################
+###############################################
+#subset into >5
+App1w.5w <- subset(App1w, Total >5, select = c(Class,Order,Family,
+                                               Genus, Species,
+                                               spp, Total,
+                                               Infected, propinf,
+                                               `0.03`, `0.98`, 
+                                               `Distancebetween`))
+#Figure 1 is >5 and >0.001 of propinf
+App1w5infw <- subset(App1w.5w, App1w.5w$propinf >0.001,
+                     select = c(Class,Order, Family, Genus, Species,
+                                spp, Total, Infected, 
+                                propinf, `0.03`, `0.98`,
+                                `Distancebetween`))
+tot5infw <- ggplot(data=App1w5infw,
+                   aes(reorder(spp,propinf,sum),y=propinf))
+
+myplotinfw <- tot5infw + geom_point(alpha=.8,size=.5) +
+  theme(plot.title = element_text(hjust=0.5),
+        axis.ticks= element_blank(), 
+        axis.text.x=element_blank()) +
+  xlab("Species") +
+  ylab("Proportion Infected (mean +/- 95% Credible Interval)") +
+  ggtitle("Estimated Proportion of Infected Individuals per Species (>5 Individuals)") +
+  scale_x_discrete(name="Species",breaks=NULL) +
+  geom_errorbar(aes(ymin=App1w5infw$`0.03`,ymax=App1w5infw$`0.98`),
+                alpha=0.5)
+ggsave("Figure1w.tiff",plot=myplotinfw,width=7,height=7,dpi=300)
+#################################################
+###########The App1w graphs############################
+#######################################################
+#first need to make an App1w df of just infected
+App1winfw<- subset(App1w,
+                   propinf>0.001, 
+                   select = c(Class,Order, Family,
+                              Genus, Species,
+                              spp, Total, Infected, 
+                              propinf, `0.03`, `0.98`, 
+                              `Distancebetween`,Bacterium))
+#capitalize all the orders
+App1winfw$Order <- as.character(App1winfw$Order)
+App1winfw$Order <- capitalize(App1winfw$Order)
+##################Blattaria#############
+#subsets those data with all species within the order Blattaria
+App1wb <- subset(App1winfw,
+                 Order == "Blattaria",
+                 select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+#subsets data with all species with more than 1 individual tested
+App1w1b <- subset(App1wb,
+                  Total >1,
+                  select = c(Order,spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+#subsets data with all species with more than 5 individual tested
+App1w5b <- subset(App1wb, Total >5, 
+                  select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+##################Coleoptera#############
+#subsets those data with all species within the order Coleoptera
+App1wc <- subset(App1winfw, Order == "Coleoptera", 
+                 select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+#subsets data with all species with more than 1 individual tested
+App1w1c <- subset(App1wc, Total >1, 
+                  select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+#subsets data with all species with more than 5 individual tested
+App1w5c <- subset(App1wc, Total >5, 
+                  select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+#subsets data with all species with more than 10 individual tested
+App1w10c <- subset(App1wc, Total >10, 
+                   select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+#subsets data with all species with more than 20 individual tested
+App1w20c <- subset(App1wc, Total >20, 
+                   select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+##############Diptera################
+#subsets those data with all species within the order Diptera
+App1wd <- subset(App1winfw, Order == "Diptera", 
+                 select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+#subsets data with all species with more than 1 individual tested
+App1w1d <- subset(App1wd, Total >1, 
+                  select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+#subsets data with all species with more than 5 individual tested
+App1w5d <- subset(App1wd, Total >5, 
+                  select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+#subsets data with all species with more than 10 individual tested
+App1w10d <- subset(App1wd, Total >10, 
+                   select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+#subsets data with all species with more than 20 individual tested
+App1w20d <- subset(App1wd, Total >20, 
+                   select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+############Ephemeroptera###############
+#subsets those data with all species within the order Ephemeroptera
+App1wE <- subset(App1winfw, Order == "Ephemeroptera", 
+                 select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+#subsets data with all species with more than 1 individual tested
+App1w1E <- subset(App1wE, Total >1, 
+                  select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+#subsets data with all species with more than 5 individual tested
+App1w5E <- subset(App1wE, Total >5, 
+                  select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+############Hemiptera###############
+#subsets those data with all species within the order Ephemeroptera
+App1wHe <- subset(App1winfw, Order == "Hemiptera", 
+                  select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+#subsets data with all species with more than 1 individual tested
+App1w1He <- subset(App1wHe, Total >1, 
+                   select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+#subsets data with all species with more than 5 individual tested
+App1w5He <- subset(App1wHe, Total >5, 
+                   select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+#subsets data with all species with more than 10 individual tested
+App1w10He <- subset(App1wHe, Total >10, 
+                    select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+#subsets data with all species with more than 20 individual tested
+App1w20He <- subset(App1wHe, Total >20, 
+                    select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+############Hymenoptera###############
+#subsets those data with all species within the order Ephemeroptera
+App1wHy <- subset(App1winfw, Order == "Hymenoptera", 
+                  select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+#subsets data with all species with more than 1 individual tested
+App1w1Hy <- subset(App1wHy, Total >1, 
+                   select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+#subsets data with all species with more than 5 individual tested
+App1w5Hy <- subset(App1wHy, Total >5, 
+                   select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+#subsets data with all species with more than 10 individual tested
+App1w10Hy <- subset(App1wHy, Total >10, 
+                    select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+#subsets data with all species with more than 20 individual tested
+App1w20Hy <- subset(App1wHy, Total >20, 
+                    select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+############Lepidoptera###############
+#subsets those data with all species within the order Ephemeroptera
+App1wL <- subset(App1winfw, Order == "Lepidoptera", 
+                 select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+#subsets data with all species with more than 1 individual tested
+App1w1L <- subset(App1wL, Total >1, 
+                  select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+#subsets data with all species with more than 5 individual tested
+App1w5L <- subset(App1wL, Total >5, 
+                  select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+#subsets data with all species with more than 10 individual tested
+App1w10L <- subset(App1wL, Total >10, 
+                   select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+#subsets data with all species with more than 20 individual tested
+App1w20L <- subset(App1wL, Total >20, 
+                   select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+############Odonata###############
+#subsets those data with all species within the order Ephemeroptera
+App1wo <- subset(App1winfw, Order == "Odonata", 
+                 select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+#subsets data with all species with more than 1 individual tested
+App1w1o <- subset(App1wo, Total >1, 
+                  select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+#subsets data with all species with more than 5 individual tested
+App1w5o <- subset(App1wo, Total >5, 
+                  select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+#subsets data with all species with more than 10 individual tested
+App1w10o <- subset(App1wo, Total >10, 
+                   select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+#subsets data with all species with more than 20 individual tested
+App1w20o <- subset(App1wo, Total >20, 
+                   select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+############Orthoptera###############
+#subsets those data with all species within the order Orthoptera
+App1wor <- subset(App1winfw, Order == "Orthoptera", 
+                  select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+#subsets data with all species with more than 1 individual tested
+App1w1or <- subset(App1wor, Total >1, 
+                   select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+#subsets data with all species with more than 5 individual tested
+App1w5or <- subset(App1wor, Total >5, 
+                   select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+#subsets data with all species with more than 10 individual tested
+App1w10or <- subset(App1wor, Total >10, 
+                    select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+#subsets data with all species with more than 20 individual tested
+App1w20or <- subset(App1wor, Total >20, 
+                    select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+############Siphonaptera###############
+#subsets those data with all species within the order Siphonaptera
+App1wsi <- subset(App1winfw, Order == "Siphonaptera", 
+                  select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+#subsets data with all species with more than 1 individual tested
+App1w1si <- subset(App1wsi, Total >1, 
+                   select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+#subsets data with all species with more than 5 individual tested
+App1w5si <- subset(App1wsi, Total >5, 
+                   select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+#subsets data with all species with more than 10 individual tested
+App1w10si <- subset(App1wsi, Total >10, 
+                    select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+#subsets data with all species with more than 20 individual tested
+App1w20si <- subset(App1wsi, Total >20, 
+                    select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+############Strepsiptera###############
+#subsets those data with all species within the order Strepsiptera
+App1wst <- subset(App1winfw, Order == "Strepsiptera", 
+                  select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+#subsets data with all species with more than 1 individual tested
+App1w1st <- subset(App1wst, Total >1, 
+                   select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+#subsets data with all species with more than 5 individual tested
+App1w5st <- subset(App1wst, Total >5, 
+                   select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+#subsets data with all species with more than 10 individual tested
+App1w10st <- subset(App1wst, Total >10, 
+                    select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+#subsets data with all species with more than 20 individual tested
+App1w20st <- subset(App1wst, Total >20, 
+                    select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+
+#part 2: create a column in each that contains the partition
+#some of them won't be used
+App1wb$cut<-"Full"
+App1w1b$cut<-">1"
+App1w5b$cut<-">5"
+App1wc$cut<-"Full"
+App1w1c$cut<-">1"
+App1w5c$cut<-">5"
+App1w10c$cut <-">10"
+App1w20c$cut<- ">20"
+App1wd$cut<-"Full"
+App1w1d$cut<-">1"
+App1w5d$cut<-">5"
+App1w10d$cut <-">10"
+App1w20d$cut<- ">20"
+App1wE$cut<-"Full"
+App1w1E$cut<-">1"
+App1w5E$cut<-">5"
+App1wHe$cut<-"Full"
+App1w1He$cut<-">1"
+App1w5He$cut<-">5"
+App1w10He$cut <-">10"
+App1w20He$cut<- ">20"
+App1wHy$cut<-"Full"
+App1w1Hy$cut<-">1"
+App1w5Hy$cut<-">5"
+App1w10Hy$cut <-">10"
+App1w20Hy$cut<- ">20"
+App1wL$cut<-"Full"
+App1w1L$cut<-">1"
+App1w5L$cut<-">5"
+App1w10L$cut <-">10"
+App1w20L$cut<- ">20"
+App1wo$cut<-"Full"
+App1w1o$cut<-">1"
+App1w5o$cut<-">5"
+App1w10o$cut <-">10"
+App1w20o$cut<- ">20"
+App1wor$cut<-"Full"
+App1w1or$cut<-">1"
+App1w5or$cut<-">5"
+App1w10or$cut <-">10"
+App1w20or$cut<- ">20"
+App1wsi$cut<-"Full"
+App1w1si$cut<-">1"
+App1w5si$cut<-">5"
+App1w10si$cut <-">10"
+App1w20si$cut<- ">20"
+App1wst$cut<-"Full"
+App1w1st$cut<-">1"
+App1w5st$cut<-">5"
+App1w10st$cut <-">10"
+App1w20st$cut<- ">20"
+#now combine them all back together
+order_limitedw <- rbind(App1wc,App1w1c,
+                        App1w5c,App1w10c,App1w20c,
+                        App1wd,App1w1d,App1w5d,App1w10d,
+                        App1w20d,App1wHe,App1w1He,App1w5He,
+                        App1w10He,App1w20He,App1wHy,App1w1Hy,
+                        App1w5Hy,App1w10Hy,App1w20Hy,App1wL,
+                        App1w1L,App1w5L,App1w10L,App1w20L,
+                        App1wo,App1w1o,App1w5o,App1w10o,App1w20o)
+#this one works as figure 2
+orderplotw <- ggplot(data=order_limitedw,aes(x=reorder(spp,propinf,mean),
+                                             y=propinf,
+                                             ymin=`0.03`,
+                                             ymax=`0.98`,
+                                             color=Order))
+ordergraphw <- orderplotw + geom_pointrange(alpha=0.4,size=0.1) +
+  facet_wrap(~factor(Order,levels=c("Coleoptera",
+                                    "Diptera",
+                                    "Hemiptera",
+                                    "Hymenoptera",
+                                    "Lepidoptera",
+                                    "Odonata")) + 
+               factor(cut,levels=c("Full",">1",">5",">10",">20")),
+             scales="free_x",ncol=5,nrow=6,
+             labeller=label_wrap_gen(multi_line = FALSE))+
+  ggtitle("Infection Frequency Within Species Among Orders With Wolbachia")+
+  theme(plot.title=element_text(hjust=0.5,size=12),
+        axis.title.y=element_text(size=10),
+        axis.title.x=element_text(size=10),
+        axis.text.y=element_text(size=8),
+        strip.text.x = element_text(size=8),
+        axis.ticks=element_blank(),
+        axis.text.x= element_blank(), 
+        text=element_text(size=8),
+        legend.position="none") +
+  scale_y_continuous(name="Infection Frequency (Mean +/- 95% Credible Interval)", 
+                     breaks=c(0,0.5,1))+
+  scale_x_discrete(name="Species",breaks=NULL) +
+  scale_color_manual(values=c("blue4",
+                              "gold3",
+                              "green4",
+                              "cyan3",
+                              "firebrick4",
+                              "darkmagenta"))
+ggsave("Figure2w.tiff",plot=ordergraphw,
+       width=171,height=240,units='mm',dpi=300)
+#stats on figure 2
+#finding the proportion below 0.5 for each order
+#first to find the number tested within each order
+print("coleoptera")
+a<-sum(App1w5c$propinf<1)
+b<-sum(App1w5c$propinf<0.5)
+b/a
+print("Diptera")
+c<-sum(App1w5d$propinf<1)
+d<-sum(App1w5d$propinf<0.5)
+d/c
+print("Hemiptera")
+e<- sum(App1w5He$propinf<1)
+f<-sum(App1w5He$propinf<0.5)
+f/e
+print("Hymenoptera")
+g<-sum(App1w5Hy$propinf<1)
+h<-sum(App1w5Hy$propinf<0.5)
+h/g
+print("Lepidoptera")
+i<-sum(App1w5L$propinf<1)
+j<-sum(App1w5L$propinf<0.5)
+j/i
+print("Odonata")
+k<-sum(App1w5o$propinf<1)
+l<-sum(App1w5o$propinf<0.5)
+l/k
+###################################################
+#################Second batch of models############
+###################################################
+m2w <- brm(Infected|trials(Total)~Order+(1|spp),data=App1w,family=binomial(link="logit"),
+          prior=c(prior(normal(0,2),class="Intercept"),
+                  prior(cauchy(0,1),class="sd"),
+                  prior(normal(0,2),class="b")),
+          chains=4,iter=4000)
+m2postw<-posterior_samples(m2w)
+m2margw<-marginal_effects(m2w,robust=FALSE)
+m2margw<-as.data.frame(m2margw$Order)
+#this will make a graph based on just the multilevel model
+m2pw<-ggplot()
+multi1w<- m2pw+geom_pointrange(
+  data=m2margw,aes(x=Order,y=estimate__,ymin=lower__,ymax=upper__)) +
+  xlab("Order") +
+  theme(axis.text.x=element_text(size=8,angle=90),axis.title.y=element_text(size=8)) +
+  ylab("Proportion of Individuals Infected (mean +/- 95% Credible Interval)") +
+  ylim(c(0,1))+
+  ggtitle("Multi-level model")
+#Everything below will recreate the results from sazama et al 2017 but for all orders
+#Archaeognatha will not run because there is only one sample
+#blattaria
+d3blat<-App1w[App1w$Order=="Blattaria",]
+d3blat<- as.data.frame(d3blat)
+d3blat$Infected <- as.integer(d3blat$Infected)
+d3blat$Total <- as.integer(d3blat$Total)
+m5.blat<-map2stan(
+  alist(
+    Infected~dbetabinom(Total,pbar,theta),
+    logit(pbar)<-a,
+    a~dnorm(0,3),
+    theta~dexp(1)
+  ),
+  data=d3blat,
+  constraints=list(theta="lower=0"),
+  start=list(theta=3),
+  warmup=2000,iter=4000,chains=4)
+plot(m5.blat)
+precis(m5.blat,prob=.95,depth=2)
+postblat<-extract.samples(m5.blat)
+p_blat<-mean(logistic(postblat$a))
+plow_blat<-quantile(logistic(postblat$a),prob=0.025)
+phigh_blat<-quantile(logistic(postblat$a),prob=0.975)
+t_blat<-mean(postblat$theta)
+list(c(1-pbeta(0.001,p_blat*t_blat,(1-p_blat)*t_blat),
+       1-pbeta(0.001,plow_blat*t_blat,(1-plow_blat)*t_blat),
+       1-pbeta(0.001,phigh_blat*t_blat,(1-phigh_blat)*t_blat)))
+####Coleoptera###
+#################################
+d3col<-App1w[App1w$Order=="Coleoptera",]
+d3col<- as.data.frame(d3col)
+d3col$Infected <- as.integer(d3col$Infected)
+d3col$Total <- as.integer(d3col$Total)
+m5.col<-map2stan(
+  alist(
+    Infected~dbetabinom(Total,pbar,theta),
+    logit(pbar)<-a,
+    a~dnorm(0,3),
+    theta~dexp(1)
+  ),
+  data=d3col,
+  constraints=list(theta="lower=0"),
+  start=list(theta=3),
+  warmup=2000,iter=4000,chains=4)
+plot(m5.col)
+precis(m5.col,prob=.95,depth=2)
+postcol<-extract.samples(m5.col)
+p_col<-mean(logistic(postcol$a))
+plow_col<-quantile(logistic(postcol$a),prob=0.025)
+phigh_col<-quantile(logistic(postcol$a),prob=0.975)
+t_col<-mean(postcol$theta)
+list(c(1-pbeta(0.001,p_col*t_col,(1-p_col)*t_col),
+       1-pbeta(0.001,plow_col*t_col,(1-plow_col)*t_col),
+       1-pbeta(0.001,phigh_col*t_col,(1-phigh_col)*t_col)))
+#Dermaptera
+d3derm<-App1w[App1w$Order=="Dermaptera",]
+d3derm<- as.data.frame(d3derm)
+d3derm$Infected <- as.integer(d3derm$Infected)
+d3derm$Total <- as.integer(d3derm$Total)
+m5.derm<-map2stan(
+  alist(
+    Infected~dbetabinom(Total,pbar,theta),
+    logit(pbar)<-a,
+    a~dnorm(0,3),
+    theta~dexp(1)
+  ),
+  data=d3derm,
+  constraints=list(theta="lower=0"),
+  start=list(theta=3),
+  warmup=2000,iter=4000,chains=4)
+
+plot(m5.derm)
+precis(m5.derm,prob=.95,depth=2)
+postderm<-extract.samples(m5.derm)
+p_derm<-mean(logistic(postderm$a))
+plow_derm<-quantile(logistic(postderm$a),prob=0.025)
+phigh_derm<-quantile(logistic(postderm$a),prob=0.975)
+t_derm<-mean(postderm$theta)
+list(c(1-pbeta(0.001,p_derm*t_derm,(1-p_derm)*t_derm),
+       1-pbeta(0.001,plow_derm*t_derm,(1-plow_derm)*t_derm),
+       1-pbeta(0.001,phigh_derm*t_derm,(1-phigh_derm)*t_derm)))
+#create dataframe from data in sazama et al 2017
+#diptera
+d3dip<-App1w[App1w$Order=="Diptera",]
+#if I need to do this just for aquatics then I need 
+#to subset the data further into aquatics only
+#d3dip<-d3dip[d3dip$AT=="aquatic",]
+d3dip<- as.data.frame(d3dip)
+d3dip$Infected <- as.integer(d3dip$Infected)
+d3dip$Total <- as.integer(d3dip$Total)
+m5.dip<-map2stan(
+  alist(
+    Infected~dbetabinom(Total,pbar,theta),
+    logit(pbar)<-a,
+    a~dnorm(0,3),
+    theta~dexp(1)
+  ),
+  data=d3dip,
+  constraints=list(theta="lower=0"),
+  start=list(theta=3),
+  warmup=2000,iter=4000,chains=4)
+plot(m5.dip)
+precis(m5.dip,prob=.95,depth=2)
+postdip<-extract.samples(m5.dip)
+p_dip<-mean(logistic(postdip$a))
+plow_dip<-quantile(logistic(postdip$a),prob=0.025)
+phigh_dip<-quantile(logistic(postdip$a),prob=0.975)
+t_dip<-mean(postdip$theta)
+list(c(1-pbeta(0.001,p_dip*t_dip,(1-p_dip)*t_dip),
+       1-pbeta(0.001,plow_dip*t_dip,(1-plow_dip)*t_dip),
+       1-pbeta(0.001,phigh_dip*t_dip,(1-phigh_dip)*t_dip)))
+
+quantile(logistic(postdip$a))
+####Ephemeroptera###
+#################################
+d3eph<-App1w[App1w$Order=="Ephemeroptera",]
+d3eph<- as.data.frame(d3eph)
+d3eph$Infected <- as.integer(d3eph$Infected)
+d3eph$Total <- as.integer(d3eph$Total)
+m5.eph<-map2stan(
+  alist(
+    Infected~dbetabinom(Total,pbar,theta),
+    logit(pbar)<-a,
+    a~dnorm(0,3),
+    theta~dexp(1)
+  ),
+  data=d3eph,
+  constraints=list(theta="lower=0"),
+  start=list(theta=3),
+  warmup=2000,iter=4000,chains=4)
+plot(m5.eph)
+precis(m5.eph,prob=.95,depth=2)
+posteph<-extract.samples(m5.eph)
+p_eph<-mean(logistic(posteph$a))
+plow_eph<-quantile(logistic(posteph$a),prob=0.025)
+phigh_eph<-quantile(logistic(posteph$a),prob=0.975)
+t_eph<-mean(posteph$theta)
+list(c(1-pbeta(0.001,p_eph*t_eph,(1-p_eph)*t_eph),
+       1-pbeta(0.001,plow_eph*t_eph,(1-plow_eph)*t_eph),
+       1-pbeta(0.001,phigh_eph*t_eph,(1-phigh_eph)*t_eph)))
+####Hemiptera###
+#################################
+d3hem<-App1w[App1w$Order=="Hemiptera",]
+d3hem<- as.data.frame(d3hem)
+d3hem$Infected <- as.integer(d3hem$Infected)
+d3hem$Total <- as.integer(d3hem$Total)
+m5.hem<-map2stan(
+  alist(
+    Infected~dbetabinom(Total,pbar,theta),
+    logit(pbar)<-a,
+    a~dnorm(0,3),
+    theta~dexp(1)
+  ),
+  data=d3hem,
+  constraints=list(theta="lower=0"),
+  start=list(theta=3),
+  warmup=2000,iter=4000,chains=4)
+plot(m5.hem)
+precis(m5.hem,prob=.95,depth=2)
+posthem<-extract.samples(m5.hem)
+p_hem<-mean(logistic(posthem$a))
+plow_hem<-quantile(logistic(posthem$a),prob=0.025)
+phigh_hem<-quantile(logistic(posthem$a),prob=0.975)
+t_hem<-mean(posthem$theta)
+list(c(1-pbeta(0.001,p_hem*t_hem,(1-p_hem)*t_hem),
+       1-pbeta(0.001,plow_hem*t_hem,(1-plow_hem)*t_hem),
+       1-pbeta(0.001,phigh_hem*t_hem,(1-phigh_hem)*t_hem)))
+####Hymenoptera###
+#################################
+d3hym<-App1w[App1w$Order=="Hymenoptera",]
+d3hym<- as.data.frame(d3hym)
+d3hym$Infected <- as.integer(d3hym$Infected)
+d3hym$Total <- as.integer(d3hym$Total)
+m5.hym<-map2stan(
+  alist(
+    Infected~dbetabinom(Total,pbar,theta),
+    logit(pbar)<-a,
+    a~dnorm(0,3),
+    theta~dexp(1)
+  ),
+  data=d3hym,
+  constraints=list(theta="lower=0"),
+  start=list(theta=3),
+  warmup=2000,iter=4000,chains=4)
+plot(m5.hym)
+precis(m5.hym,prob=.95,depth=2)
+posthym<-extract.samples(m5.hym)
+p_hym<-mean(logistic(posthym$a))
+plow_hym<-quantile(logistic(posthym$a),prob=0.025)
+phigh_hym<-quantile(logistic(posthym$a),prob=0.975)
+theta<-mean(posthym$theta)
+list(c(1-pbeta(0.001,p_hym*theta,(1-p_hym)*theta),
+       1-pbeta(0.001,plow_hym*theta,(1-plow_hym)*theta),
+       1-pbeta(0.001,phigh_hym*theta,(1-phigh_hym)*theta)))
+####isoptera###
+#################################
+d3iso<-App1w[App1w$Order=="Isoptera",]
+d3iso<- as.data.frame(d3iso)
+d3iso$Infected <- as.integer(d3iso$Infected)
+d3iso$Total <- as.integer(d3iso$Total)
+m5.iso<-map2stan(
+  alist(
+    Infected~dbetabinom(Total,pbar,theta),
+    logit(pbar)<-a,
+    a~dnorm(0,3),
+    theta~dexp(1)
+  ),
+  data=d3iso,
+  constraints=list(theta="lower=0"),
+  start=list(theta=3),
+  warmup=2000,iter=4000,chains=4)
+plot(m5.iso)
+precis(m5.iso,prob=.95,depth=2)
+postiso<-extract.samples(m5.iso)
+p_iso<-mean(logistic(postiso$a))
+plow_iso<-quantile(logistic(postiso$a),prob=0.025)
+phigh_iso<-quantile(logistic(postiso$a),prob=0.975)
+t_iso<-mean(postiso$theta)
+list(c(1-pbeta(0.001,p_iso*t_iso,(1-p_iso)*t_iso),
+       1-pbeta(0.001,plow_iso*t_iso,(1-plow_iso)*t_iso),
+       1-pbeta(0.001,phigh_iso*t_iso,(1-phigh_iso)*t_iso)))
+####Lepidoptera###
+#################################
+d3lep<-App1w[App1w$Order=="Lepidoptera",]
+d3lep<- as.data.frame(d3lep)
+d3lep$Infected <- as.integer(d3lep$Infected)
+d3lep$Total <- as.integer(d3lep$Total)
+m5.lep<-map2stan(
+  alist(
+    Infected~dbetabinom(Total,pbar,theta),
+    logit(pbar)<-a,
+    a~dnorm(0,3),
+    theta~dexp(1)
+  ),
+  data=d3lep,
+  constraints=list(theta="lower=0"),
+  start=list(theta=3),
+  warmup=2000,iter=4000,chains=4)
+plot(m5.lep)
+precis(m5.lep,prob=.95,depth=2)
+postlep<-extract.samples(m5.lep)
+p_lep<-mean(logistic(postlep$a))
+plow_lep<-quantile(logistic(postlep$a),prob=0.025)
+phigh_lep<-quantile(logistic(postlep$a),prob=0.975)
+t_lep<-mean(postlep$theta)
+list(c(1-pbeta(0.001,p_lep*t_lep,(1-p_lep)*t_lep),
+       1-pbeta(0.001,plow_lep*t_lep,(1-plow_lep)*t_lep),
+       1-pbeta(0.001,phigh_lep*t_lep,(1-phigh_lep)*t_lep)))
+####Mantodea###
+#################################
+d3man<-App1w[App1w$Order=="Mantodea",]
+d3man<- as.data.frame(d3man)
+d3man$Infected <- as.integer(d3man$Infected)
+d3man$Total <- as.integer(d3man$Total)
+m5.man<-map2stan(
+  alist(
+    Infected~dbetabinom(Total,pbar,theta),
+    logit(pbar)<-a,
+    a~dnorm(0,3),
+    theta~dexp(1)
+  ),
+  data=d3man,
+  constraints=list(theta="lower=0"),
+  start=list(theta=3),
+  warmup=2000,iter=4000,chains=4)
+plot(m5.man)
+precis(m5.man,prob=.95,depth=2)
+postman<-extract.samples(m5.man)
+p_man<-mean(logistic(postman$a))
+plow_man<-quantile(logistic(postman$a),prob=0.025)
+phigh_man<-quantile(logistic(postman$a),prob=0.975)
+t_man<-mean(postman$theta)
+list(c(1-pbeta(0.001,p_man*t_man,(1-p_man)*t_man),
+       1-pbeta(0.001,plow_man*t_man,(1-plow_man)*t_man),
+       1-pbeta(0.001,phigh_man*t_man,(1-phigh_man)*t_man)))
+####Mecoptera###
+#################################
+#only one individual and species so it won't work
+####Megaloptera###
+#################################
+#only one individual and species so it won't work
+####Neuroptera###
+#################################
+d3neu<-App1w[App1w$Order=="Neuroptera",]
+d3neu<- as.data.frame(d3neu)
+d3neu$Infected <- as.integer(d3neu$Infected)
+d3neu$Total <- as.integer(d3neu$Total)
+m5.neu<-map2stan(
+  alist(
+    Infected~dbetabinom(Total,pbar,theta),
+    logit(pbar)<-a,
+    a~dnorm(0,3),
+    theta~dexp(1)
+  ),
+  data=d3neu,
+  constraints=list(theta="lower=0"),
+  start=list(theta=3),
+  warmup=2000,iter=4000,chains=4)
+plot(m5.neu)
+precis(m5.neu,prob=.95,depth=2)
+postneu<-extract.samples(m5.neu)
+p_neu<-mean(logistic(postneu$a))
+plow_neu<-quantile(logistic(postneu$a),prob=0.025)
+phigh_neu<-quantile(logistic(postneu$a),prob=0.975)
+t_neu<-mean(postneu$theta)
+list(c(1-pbeta(0.001,p_neu*t_neu,(1-p_neu)*t_neu),
+       1-pbeta(0.001,plow_neu*t_neu,(1-plow_neu)*t_neu),
+       1-pbeta(0.001,phigh_neu*t_neu,(1-phigh_neu)*t_neu)))
+####Odonata###
+#################################
+d3odo<-App1w[App1w$Order=="Odonata",]
+d3odo<- as.data.frame(d3odo)
+d3odo$Infected <- as.integer(d3odo$Infected)
+d3odo$Total <- as.integer(d3odo$Total)
+m5.odo<-map2stan(
+  alist(
+    Infected~dbetabinom(Total,pbar,theta),
+    logit(pbar)<-a,
+    a~dnorm(0,3),
+    theta~dexp(1)
+  ),
+  data=d3odo,
+  constraints=list(theta="lower=0"),
+  start=list(theta=3),
+  warmup=2000,iter=4000,chains=4)
+plot(m5.odo)
+precis(m5.odo,prob=.95,depth=2)
+postodo<-extract.samples(m5.odo)
+p_odo<-mean(logistic(postodo$a))
+plow_odo<-quantile(logistic(postodo$a),prob=0.025)
+phigh_odo<-quantile(logistic(postodo$a),prob=0.975)
+t_odo<-mean(postodo$theta)
+list(c(1-pbeta(0.001,p_odo*t_odo,(1-p_odo)*t_odo),
+       1-pbeta(0.001,plow_odo*t_odo,(1-plow_odo)*t_odo),
+       1-pbeta(0.001,phigh_odo*t_odo,(1-phigh_odo)*t_odo)))
+####Orthoptera###
+#################################
+d3ort<-App1w[App1w$Order=="Orthoptera",]
+d3ort<- as.data.frame(d3ort)
+d3ort$Infected <- as.integer(d3ort$Infected)
+d3ort$Total <- as.integer(d3ort$Total)
+m5.ort<-map2stan(
+  alist(
+    Infected~dbetabinom(Total,pbar,theta),
+    logit(pbar)<-a,
+    a~dnorm(0,3),
+    theta~dexp(1)
+  ),
+  data=d3ort,
+  constraints=list(theta="lower=0"),
+  start=list(theta=3),
+  warmup=2000,iter=4000,chains=4)
+plot(m5.ort)
+precis(m5.ort,prob=.95,depth=2)
+postort<-extract.samples(m5.ort)
+p_ort<-mean(logistic(postort$a))
+plow_ort<-quantile(logistic(postort$a),prob=0.025)
+phigh_ort<-quantile(logistic(postort$a),prob=0.975)
+t_ort<-mean(postort$theta)
+list(c(1-pbeta(0.001,p_ort*t_ort,(1-p_ort)*t_ort),
+       1-pbeta(0.001,plow_ort*t_ort,(1-plow_ort)*t_ort),
+       1-pbeta(0.001,phigh_ort*t_ort,(1-phigh_ort)*t_ort)))
+####Phasmida###
+#################################
+d3pha<-App1w[App1w$Order=="Phasmida",]
+d3pha<- as.data.frame(d3pha)
+d3pha$Infected <- as.integer(d3pha$Infected)
+d3pha$Total <- as.integer(d3pha$Total)
+m5.pha<-map2stan(
+  alist(
+    Infected~dbetabinom(Total,pbar,theta),
+    logit(pbar)<-a,
+    a~dnorm(0,3),
+    theta~dexp(1)
+  ),
+  data=d3pha,
+  constraints=list(theta="lower=0"),
+  start=list(theta=3),
+  warmup=2000,iter=4000,chains=4)
+plot(m5.pha)
+precis(m5.pha,prob=.95,depth=2)
+postpha<-extract.samples(m5.pha)
+p_pha<-mean(logistic(postpha$a))
+plow_pha<-quantile(logistic(postpha$a),prob=0.025)
+phigh_pha<-quantile(logistic(postpha$a),prob=0.975)
+t_pha<-mean(postpha$theta)
+list(c(1-pbeta(0.001,p_pha*t_pha,(1-p_pha)*t_pha),
+       1-pbeta(0.001,plow_pha*t_pha,(1-plow_pha)*t_pha),
+       1-pbeta(0.001,phigh_pha*t_pha,(1-phigh_pha)*t_pha)))
+####Plecoptera###
+#################################
+d3ple<-App1w[App1w$Order=="Plecoptera",]
+d3ple<- as.data.frame(d3ple)
+d3ple$Infected <- as.integer(d3ple$Infected)
+d3ple$Total <- as.integer(d3ple$Total)
+m5.ple<-map2stan(
+  alist(
+    Infected~dbetabinom(Total,pbar,theta),
+    logit(pbar)<-a,
+    a~dnorm(0,3),
+    theta~dexp(1)
+  ),
+  data=d3ple,
+  constraints=list(theta="lower=0"),
+  start=list(theta=3),
+  warmup=2000,iter=4000,chains=4)
+plot(m5.ple)
+precis(m5.ple,prob=.95,depth=2)
+postple<-extract.samples(m5.ple)
+p_ple<-mean(logistic(postple$a))
+plow_ple<-quantile(logistic(postple$a),prob=0.025)
+phigh_ple<-quantile(logistic(postple$a),prob=0.975)
+t_ple<-mean(postple$theta)
+list(c(1-pbeta(0.001,p_ple*t_ple,(1-p_ple)*t_ple),
+       1-pbeta(0.001,plow_ple*t_ple,(1-plow_ple)*t_ple),
+       1-pbeta(0.001,phigh_ple*t_ple,(1-phigh_ple)*t_ple)))
+####psocodea###
+#################################
+d3pso<-App1w[App1w$Order=="Psocodea",]
+d3pso<- as.data.frame(d3pso)
+d3pso$Infected <- as.integer(d3pso$Infected)
+d3pso$Total <- as.integer(d3pso$Total)
+m5.pso<-map2stan(
+  alist(
+    Infected~dbetabinom(Total,pbar,theta),
+    logit(pbar)<-a,
+    a~dnorm(0,3),
+    theta~dexp(1)
+  ),
+  data=d3pso,
+  constraints=list(theta="lower=0"),
+  start=list(theta=3),
+  warmup=2000,iter=4000,chains=4)
+plot(m5.pso)
+precis(m5.pso,prob=.95,depth=2)
+postpso<-extract.samples(m5.pso)
+p_pso<-mean(logistic(postpso$a))
+plow_pso<-quantile(logistic(postpso$a),prob=0.025)
+phigh_pso<-quantile(logistic(postpso$a),prob=0.975)
+t_pso<-mean(postpso$theta)
+list(c(1-pbeta(0.001,p_pso*t_pso,(1-p_pso)*t_pso),
+       1-pbeta(0.001,plow_pso*t_pso,(1-plow_pso)*t_pso),
+       1-pbeta(0.001,phigh_pso*t_pso,(1-phigh_pso)*t_pso)))
+####raphidioptera###
+#################################
+#doesn't work because there is only one individual
+####Siphonaptera###
+#################################
+d3sip<-App1w[App1w$Order=="Siphonaptera",]
+d3sip<- as.data.frame(d3sip)
+d3sip$Infected <- as.integer(d3sip$Infected)
+d3sip$Total <- as.integer(d3sip$Total)
+m5.sip<-map2stan(
+  alist(
+    Infected~dbetabinom(Total,pbar,theta),
+    logit(pbar)<-a,
+    a~dnorm(0,3),
+    theta~dexp(1)
+  ),
+  data=d3sip,
+  constraints=list(theta="lower=0"),
+  start=list(theta=3),
+  warmup=2000,iter=4000,chains=4)
+plot(m5.sip)
+precis(m5.sip,prob=.95,depth=2)
+postsip<-extract.samples(m5.sip)
+p_sip<-mean(logistic(postsip$a))
+plow_sip<-quantile(logistic(postsip$a),prob=0.025)
+phigh_sip<-quantile(logistic(postsip$a),prob=0.975)
+t_sip<-mean(postsip$theta)
+list(c(1-pbeta(0.001,p_sip*t_sip,(1-p_sip)*t_sip),
+       1-pbeta(0.001,plow_sip*t_sip,(1-plow_sip)*t_sip),
+       1-pbeta(0.001,phigh_sip*t_sip,(1-phigh_sip)*t_sip)))
+####Strepsiptera###
+#################################
+d3str<-App1w[App1w$Order=="Strepsiptera",]
+d3str<- as.data.frame(d3str)
+d3str$Infected <- as.integer(d3str$Infected)
+d3str$Total <- as.integer(d3str$Total)
+m5.str<-map2stan(
+  alist(
+    Infected~dbetabinom(Total,pbar,theta),
+    logit(pbar)<-a,
+    a~dnorm(0,3),
+    theta~dexp(1)
+  ),
+  data=d3str,
+  constraints=list(theta="lower=0"),
+  start=list(theta=3),
+  warmup=2000,iter=4000,chains=4)
+plot(m5.str)
+precis(m5.str,prob=.95,depth=2)
+poststr<-extract.samples(m5.str)
+p_str<-mean(logistic(poststr$a))
+plow_str<-quantile(logistic(poststr$a),prob=0.025)
+phigh_str<-quantile(logistic(poststr$a),prob=0.975)
+t_str<-mean(poststr$theta)
+list(c(1-pbeta(0.001,p_str*t_str,(1-p_str)*t_str),
+       1-pbeta(0.001,plow_str*t_str,(1-plow_str)*t_str),
+       1-pbeta(0.001,phigh_str*t_str,(1-phigh_str)*t_str)))
+####Thysanoptera###
+#################################
+d3thy<-App1w[App1w$Order=="Thysanoptera",]
+d3thy<- as.data.frame(d3thy)
+d3thy$Infected <- as.integer(d3thy$Infected)
+d3thy$Total <- as.integer(d3thy$Total)
+m5.thy<-map2stan(
+  alist(
+    Infected~dbetabinom(Total,pbar,theta),
+    logit(pbar)<-a,
+    a~dnorm(0,3),
+    theta~dexp(1)
+  ),
+  data=d3thy,
+  constraints=list(theta="lower=0"),
+  start=list(theta=3),
+  warmup=2000,iter=4000,chains=4)
+plot(m5.thy)
+precis(m5.thy,prob=.95,depth=2)
+postthy<-extract.samples(m5.thy)
+thy$order<-"Thysanoptera"
+thy$mean<-mean(logistic(postthy$a))
+thy$low<-quantile(logistic(postthy$a),prob=0.025)
+thy$high<-quantile(logistic(postthy$a),prob=0.975)
+t_thy<-mean(postthy$theta)
+list(c(1-pbeta(0.001,p_thy*t_thy,(1-p_thy)*t_thy),
+       1-pbeta(0.001,plow_thy*t_thy,(1-plow_thy)*t_thy),
+       1-pbeta(0.001,phigh_thy*t_thy,(1-phigh_thy)*t_thy)))
+####Trichoptera###
+#################################
+d3tri<-App1w[App1w$Order=="Trichoptera",]
+d3tri<- as.data.frame(d3tri)
+d3tri$Infected <- as.integer(d3tri$Infected)
+d3tri$Total <- as.integer(d3tri$Total)
+m5.tri<-map2stan(
+  alist(
+    Infected~dbetabinom(Total,pbar,theta),
+    logit(pbar)<-a,
+    a~dnorm(0,3),
+    theta~dexp(1)
+  ),
+  data=d3tri,
+  constraints=list(theta="lower=0"),
+  start=list(theta=3),
+  warmup=2000,iter=4000,chains=4)
+
+plot(m5.tri)
+precis(m5.tri,prob=.95,depth=2)
+posttri<-extract.samples(m5.tri)
+p_tri<-mean(logistic(posttri$a))
+plow_tri<-quantile(logistic(posttri$a),prob=0.025)
+phigh_tri<-quantile(logistic(posttri$a),prob=0.975)
+theta<-mean(posttri$theta)
+list(c(1-pbeta(0.001,p_tri*theta,(1-p_tri)*theta),
+       1-pbeta(0.001,plow_tri*theta,(1-plow_tri)*theta),
+       1-pbeta(0.001,phigh_tri*theta,(1-phigh_tri)*theta)))
+#make new dataframes with all the orders
+#Archaeognatha
+#nothing here
+#blattaria
+blat <- data.frame(Order = "Blattaria")
+blat$mean<-mean(logistic(postblat$a))
+blat$low<-quantile(logistic(postblat$a),prob=0.025)
+blat$high<-quantile(logistic(postblat$a),prob=0.975)
+blat$theta<- mean(postblat$theta)
+blat$mean2<-(1-pbeta(0.001,blat$mean*blat$theta,(1-blat$mean)*blat$theta))
+blat$low2 <- 1-pbeta(0.001,blat$low*blat$theta,(1-blat$low)*blat$theta)
+blat$high2 <- 1-pbeta(0.001,blat$high*blat$theta,(1-blat$high)*blat$theta)
+#coleoptera
+coleo <- data.frame(Order = "Coleoptera")
+coleo$mean<-mean(logistic(postcol$a))
+coleo$low<-quantile(logistic(postcol$a),prob=0.025)
+coleo$high<-quantile(logistic(postcol$a),prob=0.975)
+coleo$theta<- mean(postcol$theta)
+coleo$mean2<-(1-pbeta(0.001,coleo$mean*coleo$theta,(1-coleo$mean)*coleo$theta))
+coleo$low2 <- 1-pbeta(0.001,coleo$low*coleo$theta,(1-coleo$low)*coleo$theta)
+coleo$high2 <- 1-pbeta(0.001,coleo$high*coleo$theta,(1-coleo$high)*coleo$theta)
+#dermaptera
+derm <- data.frame(Order = "Dermaptera")
+derm$mean<-mean(logistic(postderm$a))
+derm$low<-quantile(logistic(postderm$a),prob=0.025)
+derm$high<-quantile(logistic(postderm$a),prob=0.975)
+derm$theta<- mean(postderm$theta)
+derm$mean2<-(1-pbeta(0.001,derm$mean*derm$theta,(1-derm$mean)*derm$theta))
+derm$low2 <- 1-pbeta(0.001,derm$low*derm$theta,(1-derm$low)*derm$theta)
+derm$high2 <- 1-pbeta(0.001,derm$high*derm$theta,(1-derm$high)*derm$theta)
+#Diptera
+dip <- data.frame(Order = "Diptera")
+dip$mean<-mean(logistic(postdip$a))
+dip$low<-quantile(logistic(postdip$a),prob=0.025)
+dip$high<-quantile(logistic(postdip$a),prob=0.975)
+dip$theta<- mean(postdip$theta)
+dip$mean2<-(1-pbeta(0.001,dip$mean*dip$theta,(1-dip$mean)*dip$theta))
+dip$low2 <- 1-pbeta(0.001,dip$low*dip$theta,(1-dip$low)*dip$theta)
+dip$high2 <- 1-pbeta(0.001,dip$high*dip$theta,(1-dip$high)*dip$theta)
+#Ephemeroptera
+eph <- data.frame(Order = "Ephemeroptera")
+eph$mean<-mean(logistic(posteph$a))
+eph$low<-quantile(logistic(posteph$a),prob=0.025)
+eph$high<-quantile(logistic(posteph$a),prob=0.975)
+eph$theta<- mean(posteph$theta)
+eph$mean2<-(1-pbeta(0.001,eph$mean*eph$theta,(1-eph$mean)*eph$theta))
+eph$low2 <- 1-pbeta(0.001,eph$low*eph$theta,(1-eph$low)*eph$theta)
+eph$high2 <- 1-pbeta(0.001,eph$high*eph$theta,(1-eph$high)*eph$theta)
+#Hemiptera
+hem <- data.frame(Order = "Hemiptera")
+hem$mean<-mean(logistic(posthem$a))
+hem$low<-quantile(logistic(posthem$a),prob=0.025)
+hem$high<-quantile(logistic(posthem$a),prob=0.975)
+hem$theta<- mean(posthem$theta)
+hem$mean2<-(1-pbeta(0.001,hem$mean*hem$theta,(1-hem$mean)*hem$theta))
+hem$low2 <- 1-pbeta(0.001,hem$low*hem$theta,(1-hem$low)*hem$theta)
+hem$high2 <- 1-pbeta(0.001,hem$high*hem$theta,(1-hem$high)*hem$theta)
+#Hymenoptera
+hym <- data.frame(Order = "Hymenoptera")
+hym$mean<-mean(logistic(posthym$a))
+hym$low<-quantile(logistic(posthym$a),prob=0.025)
+hym$high<-quantile(logistic(posthym$a),prob=0.975)
+hym$theta<- mean(posthym$theta)
+hym$mean2<-(1-pbeta(0.001,hym$mean*hym$theta,(1-hym$mean)*hym$theta))
+hym$low2 <- 1-pbeta(0.001,hym$low*hym$theta,(1-hym$low)*hym$theta)
+hym$high2 <- 1-pbeta(0.001,hym$high*hym$theta,(1-hym$high)*hym$theta)
+#Isoptera
+iso <- data.frame(Order = "Isoptera")
+iso$mean<-mean(logistic(postiso$a))
+iso$low<-quantile(logistic(postiso$a),prob=0.025)
+iso$high<-quantile(logistic(postiso$a),prob=0.975)
+iso$theta<- mean(postiso$theta)
+iso$mean2<-(1-pbeta(0.001,iso$mean*iso$theta,(1-iso$mean)*iso$theta))
+iso$low2 <- 1-pbeta(0.001,iso$low*iso$theta,(1-iso$low)*iso$theta)
+iso$high2 <- 1-pbeta(0.001,iso$high*iso$theta,(1-iso$high)*iso$theta)
+#Lepidoptera
+lep <- data.frame(Order = "Lepidoptera")
+lep$mean<-mean(logistic(postlep$a))
+lep$low<-quantile(logistic(postlep$a),prob=0.025)
+lep$high<-quantile(logistic(postlep$a),prob=0.975)
+lep$theta<- mean(postlep$theta)
+lep$mean2<-(1-pbeta(0.001,lep$mean*lep$theta,(1-lep$mean)*lep$theta))
+lep$low2 <- 1-pbeta(0.001,lep$low*lep$theta,(1-lep$low)*lep$theta)
+lep$high2 <- 1-pbeta(0.001,lep$high*lep$theta,(1-lep$high)*lep$theta)
+#Mantodea
+man <- data.frame(Order = "Mantodea")
+man$mean<-mean(logistic(postman$a))
+man$low<-quantile(logistic(postman$a),prob=0.025)
+man$high<-quantile(logistic(postman$a),prob=0.975)
+man$theta<- mean(postman$theta)
+man$mean2<-(1-pbeta(0.001,man$mean*man$theta,(1-man$mean)*man$theta))
+man$low2 <- 1-pbeta(0.001,man$low*man$theta,(1-man$low)*man$theta)
+man$high2 <- 1-pbeta(0.001,man$high*man$theta,(1-man$high)*man$theta)
+#Mecoptera
+#there are not enough samples
+#Megaloptera
+#there are not enough samples
+#Neuroptera
+neu <- data.frame(Order = "Neuroptera")
+neu$mean<-mean(logistic(postneu$a))
+neu$low<-quantile(logistic(postneu$a),prob=0.025)
+neu$high<-quantile(logistic(postneu$a),prob=0.975)
+neu$theta<- mean(postneu$theta)
+neu$mean2<-(1-pbeta(0.001,neu$mean*neu$theta,(1-neu$mean)*neu$theta))
+neu$low2 <- 1-pbeta(0.001,neu$low*neu$theta,(1-neu$low)*neu$theta)
+neu$high2 <- 1-pbeta(0.001,neu$high*neu$theta,(1-neu$high)*neu$theta)
+#Odonata
+odo <- data.frame(Order = "Odonata")
+odo$mean<-mean(logistic(postodo$a))
+odo$low<-quantile(logistic(postodo$a),prob=0.025)
+odo$high<-quantile(logistic(postodo$a),prob=0.975)
+odo$theta<- mean(postodo$theta)
+odo$mean2<-(1-pbeta(0.001,odo$mean*odo$theta,(1-odo$mean)*odo$theta))
+odo$low2 <- 1-pbeta(0.001,odo$low*odo$theta,(1-odo$low)*odo$theta)
+odo$high2 <- 1-pbeta(0.001,odo$high*odo$theta,(1-odo$high)*odo$theta)
+#Orthoptera
+ort <- data.frame(Order = "Orthoptera")
+ort$mean<-mean(logistic(postort$a))
+ort$low<-quantile(logistic(postort$a),prob=0.025)
+ort$high<-quantile(logistic(postort$a),prob=0.975)
+ort$theta<- mean(postort$theta)
+ort$mean2<-(1-pbeta(0.001,ort$mean*ort$theta,(1-ort$mean)*ort$theta))
+ort$low2 <- 1-pbeta(0.001,ort$low*ort$theta,(1-ort$low)*ort$theta)
+ort$high2 <- 1-pbeta(0.001,ort$high*ort$theta,(1-ort$high)*ort$theta)
+#Phasmida
+pha <- data.frame(Order = "Phasmida")
+pha$mean<-mean(logistic(postpha$a))
+pha$low<-quantile(logistic(postpha$a),prob=0.025)
+pha$high<-quantile(logistic(postpha$a),prob=0.975)
+pha$theta<- mean(postpha$theta)
+pha$mean2<-(1-pbeta(0.001,pha$mean*pha$theta,(1-pha$mean)*pha$theta))
+pha$low2 <- 1-pbeta(0.001,pha$low*pha$theta,(1-pha$low)*pha$theta)
+pha$high2 <- 1-pbeta(0.001,pha$high*pha$theta,(1-pha$high)*pha$theta)
+#Plecoptera
+ple <- data.frame(Order = "Plecoptera")
+ple$mean<-mean(logistic(postple$a))
+ple$low<-quantile(logistic(postple$a),prob=0.025)
+ple$high<-quantile(logistic(postple$a),prob=0.975)
+ple$theta<- mean(postple$theta)
+ple$mean2<-(1-pbeta(0.001,ple$mean*ple$theta,(1-ple$mean)*ple$theta))
+ple$low2 <- 1-pbeta(0.001,ple$low*ple$theta,(1-ple$low)*ple$theta)
+ple$high2 <- 1-pbeta(0.001,ple$high*ple$theta,(1-ple$high)*ple$theta)
+#Psocodea
+pso <- data.frame(Order = "Psocodea")
+pso$mean<-mean(logistic(postpso$a))
+pso$low<-quantile(logistic(postpso$a),prob=0.025)
+pso$high<-quantile(logistic(postpso$a),prob=0.975)
+pso$theta<- mean(postpso$theta)
+pso$mean2<-(1-pbeta(0.001,pso$mean*pso$theta,(1-pso$mean)*pso$theta))
+pso$low2 <- 1-pbeta(0.001,pso$low*pso$theta,(1-pso$low)*pso$theta)
+pso$high2 <- 1-pbeta(0.001,pso$high*pso$theta,(1-pso$high)*pso$theta)
+#Raphidioptera
+rap <- data.frame(Order = "Raphidioptera")
+rap$mean<-mean(logistic(postrap$a))
+rap$low<-quantile(logistic(postrap$a),prob=0.025)
+rap$high<-quantile(logistic(postrap$a),prob=0.975)
+rap$theta<- mean(postrap$theta)
+rap$mean2<-(1-pbeta(0.001,rap$mean*rap$theta,(1-rap$mean)*rap$theta))
+rap$low2 <- 1-pbeta(0.001,rap$low*rap$theta,(1-rap$low)*rap$theta)
+rap$high2 <- 1-pbeta(0.001,rap$high*rap$theta,(1-rap$high)*rap$theta)
+#Siphonaptera
+sip <- data.frame(Order = "Siphonaptera")
+sip$mean<-mean(logistic(postsip$a))
+sip$low<-quantile(logistic(postsip$a),prob=0.025)
+sip$high<-quantile(logistic(postsip$a),prob=0.975)
+sip$theta<- mean(postsip$theta)
+sip$mean2<-(1-pbeta(0.001,sip$mean*sip$theta,(1-sip$mean)*sip$theta))
+sip$low2 <- 1-pbeta(0.001,sip$low*sip$theta,(1-sip$low)*sip$theta)
+sip$high2 <- 1-pbeta(0.001,sip$high*sip$theta,(1-sip$high)*sip$theta)
+#Strepsiptera
+str <- data.frame(Order = "Strepsiptera")
+str$mean<-mean(logistic(poststr$a))
+str$low<-quantile(logistic(poststr$a),prob=0.025)
+str$high<-quantile(logistic(poststr$a),prob=0.975)
+str$theta<- mean(poststr$theta)
+str$mean2<-(1-pbeta(0.001,str$mean*str$theta,(1-str$mean)*str$theta))
+str$low2 <- 1-pbeta(0.001,str$low*str$theta,(1-str$low)*str$theta)
+str$high2 <- 1-pbeta(0.001,str$high*str$theta,(1-str$high)*str$theta)
+#Thysanoptera
+thy <- data.frame(Order = "Thysanoptera")
+thy$mean<-mean(logistic(postthy$a))
+thy$low<-quantile(logistic(postthy$a),prob=0.025)
+thy$high<-quantile(logistic(postthy$a),prob=0.975)
+thy$theta<- mean(postthy$theta)
+thy$mean2<-(1-pbeta(0.001,thy$mean*thy$theta,(1-thy$mean)*thy$theta))
+thy$low2 <- 1-pbeta(0.001,thy$low*thy$theta,(1-thy$low)*thy$theta)
+thy$high2 <- 1-pbeta(0.001,thy$high*thy$theta,(1-thy$high)*thy$theta)
+#Trichoptera
+tri <- data.frame(Order = "Trichoptera")
+tri$mean<-mean(logistic(posttri$a))
+tri$low<-quantile(logistic(posttri$a),prob=0.025)
+tri$high<-quantile(logistic(posttri$a),prob=0.975)
+tri$theta<- mean(posttri$theta)
+tri$mean2<-(1-pbeta(0.001,tri$mean*tri$theta,(1-tri$mean)*tri$theta))
+tri$low2 <- 1-pbeta(0.001,tri$low*tri$theta,(1-tri$low)*tri$theta)
+tri$high2 <- 1-pbeta(0.001,tri$high*tri$theta,(1-tri$high)*tri$theta)
+blat <-as.data.frame(blat)
+coleo <-as.data.frame(coleo)
+derm<-as.data.frame(derm)
+dip<-as.data.frame(dip)
+eph<-as.data.frame(eph)
+thy<-as.data.frame(thy)
+iso<-as.data.frame(iso)
+lep<-as.data.frame(lep)
+man<-as.data.frame(man)
+neu<-as.data.frame(neu)
+odo<-as.data.frame(odo)
+ort<-as.data.frame(ort)
+pha<-as.data.frame(pha)
+ple<-as.data.frame(ple)
+pso<-as.data.frame(pso)
+rap<-as.data.frame(rap)
+sip<-as.data.frame(sip)
+str<-as.data.frame(str)
+thy<-as.data.frame(thy)
+tri<-as.data.frame(tri)
+#combines all data frames into one dataframe
+totaldf <- rbind.data.frame(blat,coleo,derm,
+                            dip,eph,hem,hym,
+                            iso,lep,man,neu,
+                            odo,ort,pha,ple,
+                            pso,sip,str,thy,
+                            tri)
+#multi level model plot with among species on top
+#Also adding an analysis of the orders, but with only those with more than 5
+#individuals sampled
+App1w.5w$Order <- as.character(App1w.5w$Order)
+App1w.5w$Order <- capitalize(App1w.5w$Order)
+m5w <- brm(Infected|trials(Total)~Order+(1|spp),data=App1w.5w,family=binomial(link="logit"),
+          prior=c(prior(normal(0,2),class="Intercept"),
+                  prior(cauchy(0,1),class="sd"),
+                  prior(normal(0,2),class="b")),
+          chains=4,iter=4000)
+m5postw<-posterior_samples(m5w)
+colmw<-mean(logistic(m5postw$b_Intercept+m5postw$b_OrderColeoptera))
+dermw<-mean(logistic(m5postw$b_Intercept+m5postw$b_OrderDermaptera))
+dipmw<-mean(logistic(m5postw$b_Intercept+m5postw$b_OrderDiptera))
+ephmw<-mean(logistic(m5postw$b_Intercept+m5postw$b_OrderEphemeroptera))
+hemmw<-mean(logistic(m5postw$b_Intercept+m5postw$b_OrderHemiptera))
+hymmw<-mean(logistic(m5postw$b_Intercept+m5postw$b_OrderHymenoptera))
+lepmw<-mean(logistic(m5postw$b_Intercept+m5postw$b_OrderLepidoptera))
+manmw<-mean(logistic(m5postw$b_Intercept+m5postw$b_OrderMantodea))
+neumw<-mean(logistic(m5postw$b_Intercept+m5postw$b_OrderNeuroptera))
+odomw<-mean(logistic(m5postw$b_Intercept+m5postw$b_OrderOdonata))
+ortmw<-mean(logistic(m5postw$b_Intercept+m5postw$b_OrderOrthoptera))
+plemw<-mean(logistic(m5postw$b_Intercept+m5postw$b_OrderPlecoptera))
+sipmw<-mean(logistic(m5postw$b_Intercept+m5postw$b_OrderSiphonaptera))
+strmw<-mean(logistic(m5postw$b_Intercept+m5postw$b_OrderStrepsiptera))
+thymw<-mean(logistic(m5postw$b_Intercept+m5postw$b_OrderThysanoptera))
+trimw<-mean(logistic(m5postw$b_Intercept+m5postw$b_OrderTrichoptera))
+
+bigonew<- rbind(colmw,dermw,dipmw,ephmw,hemmw,
+                hymmw,lepmw,manmw,neumw,odomw,
+                ortmw,plemw,sipmw,strmw,thymw,
+                trimw)
+bigonew<- as.data.frame(bigonew)
+bigonew$Order <- list("Coleoptera","Dermaptera","Diptera","Ephemeroptera",
+                     "Hemiptera","Hymenoptera","Lepidoptera","Mantodea",
+                     "Neuroptera","Odonata","Orthoptera","Plecoptera",
+                     "Siphonaptera","Strepsiptera","Thysanoptera","Trichoptera")
+bigonew$Order<-as.character(bigonew$Order)
+colnames(bigonew)[colnames(bigonew)=="V1"] <- "mean"
+colPI <- PI((logistic(m5postw$b_Intercept+m5postw$b_OrderColeoptera)),prob=0.95)
+derpi<-PI(logistic(m5postw$b_Intercept+m5postw$b_OrderDermaptera),prob=0.95)
+dippi<-PI(logistic(m5postw$b_Intercept+m5postw$b_OrderDiptera),prob=0.95)
+ephpi<-PI(logistic(m5postw$b_Intercept+m5postw$b_OrderEphemeroptera),prob=0.95)
+hempi<-PI(logistic(m5postw$b_Intercept+m5postw$b_OrderHemiptera),prob=0.95)
+hympi<-PI(logistic(m5postw$b_Intercept+m5postw$b_OrderHymenoptera),prob=0.95)
+leppi<-PI(logistic(m5postw$b_Intercept+m5postw$b_OrderLepidoptera),prob=0.95)
+manpi<-PI(logistic(m5postw$b_Intercept+m5postw$b_OrderMantodea),prob=0.95)
+neupi<-PI(logistic(m5postw$b_Intercept+m5postw$b_OrderNeuroptera),prob=0.95)
+odopi<-PI(logistic(m5postw$b_Intercept+m5postw$b_OrderOdonata),prob=0.95)
+ortpi<-PI(logistic(m5postw$b_Intercept+m5postw$b_OrderOrthoptera),prob=0.95)
+plepi<-PI(logistic(m5postw$b_Intercept+m5postw$b_OrderPlecoptera),prob=0.95)
+sippi<-PI(logistic(m5postw$b_Intercept+m5postw$b_OrderSiphonaptera),prob=0.95)
+strpi<-PI(logistic(m5postw$b_Intercept+m5postw$b_OrderStrepsiptera),prob=0.95)
+thypi<-PI(logistic(m5postw$b_Intercept+m5postw$b_OrderThysanoptera),prob=0.95)
+tripi<-PI(logistic(m5postw$b_Intercept+m5postw$b_OrderTrichoptera),prob=0.95)
+
+PIw <- rbind(colPI,derpi,dippi,ephpi,hempi,hympi,leppi,manpi,neupi,odopi,ortpi,
+            plepi,sippi,strpi,thypi,tripi)
+PIw<-as.data.frame(PIw)
+PIw$Order <- list("Coleoptera","Dermaptera","Diptera","Ephemeroptera",
+                 "Hemiptera","Hymenoptera","Lepidoptera","Mantodea",
+                 "Neuroptera","Odonata","Orthoptera","Plecoptera",
+                 "Siphonaptera","Strepsiptera","Thysanoptera","Trichoptera")
+colnames(PIw)[colnames(PIw)=="3%"] <- "Lower"
+colnames(PIw)[colnames(PIw)=="98%"] <- "Upper"
+newbiew <- join(bigonew,PIw,by="Order",type="left",
+               match="first")
+#this will make a graph based on just the multilevel model
+#checking manual results
+cpw <- ggplot()
+combinedw <- cpw+geom_pointrange(data=m2margw,
+                                 position=position_nudge(-0.3),
+                                 mapping=aes(x=reorder(Order,-estimate__),
+                                             y=estimate__,
+                                             ymin=lower__,
+                                             ymax=upper__,
+                                             color="black"),
+                                 shape=17) +
+  theme(plot.title=element_text(size=10,face="italic"),
+        axis.text.x=element_text(size=8,angle=90),
+        axis.title.y=element_blank(),
+        axis.title.x=element_blank()) +
+  ylim(c(0,1))+
+  ggtitle("Wolbachia") +
+  geom_pointrange(data=totaldf,
+                  mapping=aes(x=Order,
+                              y=mean2,
+                              ymin=low2,
+                              ymax=high2,
+                              color="red"),
+                  shape=17)+
+  geom_pointrange(data=newbiew,position=position_nudge(0.3),
+                  mapping=aes(x=Order,y=mean,
+                              ymin=Lower,ymax=Upper,color="Gray30"),
+                  shape=17)+
+  scale_color_manual(values=c("black","Gray50","red"),
+                     name=NULL,
+                     labels=c("Multi-level Total",
+                              "Multi-level >5",
+                              "Among Species"))+
+  theme(legend.text=element_text(size=10))
+combinedw
+ggsave("Figure3w.tiff",plot=combinedw,
+       width=9,height=9,dpi=300)
+#STOP HERE and restart the R session, otherwise the max number of DLLS is reached
+#run the first few lines of code in the wolbachia set
+#Now to get wolbachia, cardinium, and rickettsia groups
+#Rickettsia
+Appendix1rick<- subset(Appendix1, Appendix1$Bacterium == "Rickettsia",
+                       select = c(Class,Order, Family, Genus, Species,
+                                  spp, Total, Infected,Bacterium))
+#remove duplicates in the database
+#this one works as a roundabout way of doing it
+#rickettsia
+Appendix1.1r <- Appendix1rick %>%
+  group_by(spp) %>%
+  summarise_each(funs(sum),Total,Infected)
+#creating a second table of the same data to join to for the lost
+#information
+#Removing these columns since I don't need them
+Appendix2r <- Appendix1rick
+#creating a table of just the names so i can join them back
+Appendix2r$Total <- NULL
+Appendix2r$Infected <- NULL
+#joins the two tables so that it's all in one table
+#rickettsia
+App1r <- join(Appendix1.1r,Appendix2r,by="spp",type="left",
+              match="first")
+#sorts by spp to help with analysis later
+App1r <- App1r %>%
+  select(Class,Order,Family,
+         Genus,Species,spp,Total,Infected,Bacterium) %>%
+  arrange(spp)
+#Make Total and Infected integers for the model
+App1r$Total <- as.integer(App1r$Total)
+App1r$Infected <- as.integer(App1r$Infected)
+App1r$Order <- as.character(App1r$Order)
+App1r$Order <- capitalize(App1r$Order)
+App1r <- as.data.frame(App1r)
+###############################################
+#Now to do the model
+###############################################
+#do the model 
+model1r <- map2stan(
+  alist(
+    Infected ~ dbinom(Total, p) ,
+    logit(p) <- a_spp[spp] ,
+    a_spp[spp] ~ dnorm(a,sigma), 
+    a ~ dnorm(0,1) ,
+    sigma ~ dcauchy(0,1)
+  ), data=App1r, iter=4000,chains=4)
+summary(model1r)
+#extract samples into a database
+postbothr <- extract.samples(model1r)
+#find the mean of the samples
+App1r$propinf <- logistic(apply(postbothr$a_spp, 2, mean))
+#Find the 95% credible intervals
+bothPI.estr <- logistic(apply(postbothr$a_spp, 2, quantile,
+                              probs=c(0.025,0.975)))
+#transpose so that the rows become columns
+bothPI.estr<- t(bothPI.estr)
+#Make into a dataframe so that we can add to the other dataframe
+bothPI.estr <- as.data.frame(bothPI.estr)
+#Add to App1r
+App1r$`0.03` <- bothPI.estr[,1]
+App1r$`0.98` <- bothPI.estr[,2]
+App1r$Distancebetween <- App1r$`0.98` - App1r$`0.03`
+################################################
+########Now for the Figures#####################
+################################################
+#Figure 1 is >5 and >0.001 of propinf
+App1r.inf <- subset(App1r, App1r$propinf >0.001,
+                     select = c(Class,Order, Family, Genus, Species,
+                                spp, Total, Infected, 
+                                propinf, `0.03`, `0.98`,
+                                `Distancebetween`))
+#subset into >5
+App1r.5r <- subset(App1r, Total >5, select = c(Class,Order,Family,
+                                               Genus, Species,
+                                               spp, Total,
+                                               Infected, propinf,
+                                               `0.03`, `0.98`, 
+                                               `Distancebetween`))
+
+#Figure 1 is >5 and >0.001 of propinf
+App1r5infr <- subset(App1r.5r, App1r.5r$propinf >0.001,
+                     select = c(Class,Order, Family, Genus, Species,
+                                spp, Total, Infected, 
+                                propinf, `0.03`, `0.98`,
+                                `Distancebetween`))
+tot5infr <- ggplot(data=App1r5infr,
+                   aes(reorder(spp,propinf,sum),y=propinf))
+
+myplotinfr <- tot5infr + geom_point(alpha=.8,size=.5) +
+  theme(plot.title = element_text(hjust=0.5),
+        axis.ticks= element_blank(), 
+        axis.text.x=element_blank()) +
+  xlab("Species") +
+  ylab("Proportion Infected (mean +/- 95% Credible Interval)") +
+  ggtitle("Estimated Proportion of Infected Individuals per Species (>5 Individuals)") +
+  scale_x_discrete(name="Species",breaks=NULL) +
+  geom_errorbar(aes(ymin=App1r5infr$`0.03`,ymax=App1r5infr$`0.98`),
+                alpha=0.5)
+myplotinfr
+ggsave("Figure1r.tiff",plot=myplotinfr,width=7,height=7,dpi=300)
+#histogram of individuals in each for the infected >5 group. this is suppplemental fig 2
+histinfr <- ggplot(data=App1r5infr,aes(propinf))
+histor<- histinfr + geom_histogram(breaks=seq(0,1,by=.1)) +
+  labs(x=NULL,y=NULL) +
+  labs(title="Rickettsia")+
+  theme(plot.title = element_text(hjust=0.5))
+ggsave("Supplementalfig3r.tiff",plot=histor,width=5,height=5,dpi=150)
+histor
+#######################################################
+###########The App1r graph############################
+#######################################################
+#option 1. the long way
+#first need to make an App1r df of just infected
+App1rinfr<- subset(App1r,
+                   propinf>0.001, 
+                   select = c(Class,Order, Family,
+                              Genus, Species,
+                              spp, Total, Infected, 
+                              propinf, `0.03`, `0.98`, 
+                              `Distancebetween`,
+                              Bacterium))
+App1rinfr$Order <- as.character(App1rinfr$Order)
+App1rinfr$Order <- capitalize(App1rinfr$Order)
+##################Blattaria#############none for rick
+##################Coleoptera#############
+#subsets those data with all species within the order Coleoptera
+App1rc <- subset(App1rinfr, Order == "Coleoptera", 
+                 select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+#subsets data with all species with more than 1 individual tested
+App1r1c <- subset(App1rc, Total >1, 
+                  select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+#subsets data with all species with more than 5 individual tested
+App1r5c <- subset(App1rc, Total >5, 
+                  select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+#subsets data with all species with more than 10 individual tested
+App1r10c <- subset(App1rc, Total >10, 
+                   select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+#subsets data with all species with more than 20 individual tested
+App1r20c <- subset(App1rc, Total >20, 
+                   select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+##############Diptera################
+#subsets those data with all species within the order Diptera
+App1rd <- subset(App1rinfr, Order == "Diptera", 
+                 select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+#subsets data with all species with more than 1 individual tested
+App1r1d <- subset(App1rd, Total >1, 
+                  select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+#subsets data with all species with more than 5 individual tested
+App1r5d <- subset(App1rd, Total >5, 
+                  select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+#subsets data with all species with more than 10 individual tested
+App1r10d <- subset(App1rd, Total >10, 
+                   select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+#subsets data with all species with more than 20 individual tested
+App1r20d <- subset(App1rd, Total >20, 
+                   select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+############Ephemeroptera###############none
+############Hemiptera###############
+#subsets those data with all species within the order Ephemeroptera
+App1rHe <- subset(App1rinfr, Order == "Hemiptera", 
+                  select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+#subsets data with all species with more than 1 individual tested
+App1r1He <- subset(App1rHe, Total >1, 
+                   select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+#subsets data with all species with more than 5 individual tested
+App1r5He <- subset(App1rHe, Total >5, 
+                   select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+#subsets data with all species with more than 10 individual tested
+App1r10He <- subset(App1rHe, Total >10, 
+                    select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+#subsets data with all species with more than 20 individual tested
+App1r20He <- subset(App1rHe, Total >20, 
+                    select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+############Hymenoptera###############
+#subsets those data with all species within the order Ephemeroptera
+App1rHy <- subset(App1rinfr, Order == "Hymenoptera", 
+                  select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+#subsets data with all species with more than 1 individual tested
+App1r1Hy <- subset(App1rHy, Total >1, 
+                   select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+#subsets data with all species with more than 5 individual tested
+App1r5Hy <- subset(App1rHy, Total >5, 
+                   select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+#subsets data with all species with more than 10 individual tested
+App1r10Hy <- subset(App1rHy, Total >10, 
+                    select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+#subsets data with all species with more than 20 individual tested
+App1r20Hy <- subset(App1rHy, Total >20, 
+                    select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+############Lepidoptera###############none
+############Odonata###############none
+############Orthoptera###############none for rick
+
+############Siphonaptera###############
+#subsets those data with all species within the order Siphonaptera
+App1rsi <- subset(App1rinfr, Order == "Siphonaptera", 
+                  select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+#subsets data with all species with more than 1 individual tested
+App1r1si <- subset(App1rsi, Total >1, 
+                   select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+#subsets data with all species with more than 5 individual tested
+App1r5si <- subset(App1rsi, Total >5, 
+                   select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+#subsets data with all species with more than 10 individual tested
+App1r10si <- subset(App1rsi, Total >10, 
+                    select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+#subsets data with all species with more than 20 individual tested
+App1r20si <- subset(App1rsi, Total >20, 
+                    select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+############Strepsiptera###############None for rickesttsia
+############Psocodea###############
+App1rps <- subset(App1rinfr, Order == "Psocodea", 
+                  select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+#subsets data with all species with more than 1 individual tested
+App1r1ps <- subset(App1rps, Total >1, 
+                   select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+#subsets data with all species with more than 5 individual tested
+App1r5ps <- subset(App1rps, Total >5, 
+                   select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+#subsets data with all species with more than 10 individual tested
+App1r10ps <- subset(App1rps, Total >10, 
+                    select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+#subsets data with all species with more than 20 individual tested
+App1r20ps <- subset(App1rps, Total >20, 
+                    select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+
+#part 2: create a column in each that contains the partition
+#some of them won't be used
+App1rc$cut<-"Full"
+App1r1c$cut<-">1"
+App1r5c$cut<-">5"
+App1r10c$cut <-">10"
+App1r20c$cut<- ">20"
+App1rd$cut<-"Full"
+App1r1d$cut<-">1"
+App1r5d$cut<-">5"
+App1r10d$cut <-">10"
+App1r20d$cut<- ">20"
+App1rHe$cut<-"Full"
+App1r1He$cut<-">1"
+App1r5He$cut<-">5"
+App1r10He$cut <-">10"
+App1r20He$cut<- ">20"
+App1rHy$cut<-"Full"
+App1r1Hy$cut<-">1"
+App1r5Hy$cut<-">5"
+App1r10Hy$cut <-">10"
+App1r20Hy$cut<- ">20"
+App1rsi$cut<-"Full"
+App1r1si$cut<-">1"
+App1r5si$cut<-">5"
+App1r10si$cut <-">10"
+App1r20si$cut<- ">20"
+#now combine them all back together
+order_limitedr <- rbind(App1rc,App1r1c,
+                       App1r5c,App1r10c,App1r20c,
+                       App1rd,App1r1d,App1r5d,App1r10d,
+                       App1r20d,App1rHe,App1r1He,App1r5He,
+                       App1r10He,App1r20He,App1rHy,App1r1Hy,
+                       App1r5Hy,App1r10Hy,App1r20Hy,App1rsi,App1r1si,
+                       App1r5si,App1r10si,App1r20si)
+
+#this one works as figure 2
+orderplotr <- ggplot(data=order_limitedr,aes(x=reorder(spp,propinf,mean),
+                                           y=propinf,
+                                           ymin=`0.03`,
+                                           ymax=`0.98`,
+                                           color=Order))
+ordergraphr <- orderplotr + geom_pointrange(alpha=0.4,size=0.1) +
+  facet_wrap(~factor(Order,levels=c("Coleoptera",
+                                    "Diptera",
+                                    "Hemiptera",
+                                    "Hymenoptera",
+                                    "Siphonaptera"
+  )) + 
+    factor(cut,levels=c("Full",">1",">5",">10",">20")),
+  scales="free_x",ncol=5,nrow=6,
+  labeller=label_wrap_gen(multi_line = FALSE))+
+  ggtitle("Infection Frequency Within Species Among Orders With Rickettsia")+
+  theme(plot.title=element_text(hjust=0.5,size=12),
+        axis.title.y=element_text(size=10),
+        axis.title.x=element_text(size=10),
+        axis.text.y=element_text(size=8),
+        strip.text.x = element_text(size=8),
+        axis.ticks=element_blank(),
+        axis.text.x= element_blank(), 
+        text=element_text(size=8),
+        legend.position="none") +
+  scale_y_continuous(name="Infection Frequency (Mean +/- 95% Credible Interval)", 
+                     breaks=c(0,0.5,1))+
+  scale_x_discrete(name="Species",breaks=NULL) +
+  scale_color_manual(values=c("blue4",
+                              "gold3",
+                              "green4",
+                              "cyan3",
+                              "magenta"))
+ggsave("Figure2r.tiff",plot=ordergraphr,
+       width=171,height=150,units='mm',dpi=300)
+#stats on figure 2
+#finding the proportion below 0.5 for each order
+#first to find the number tested within each order
+print("coleoptera")
+a<-sum(App1r5c$propinf<1)
+b<-sum(App1r5c$propinf<0.5)
+b/a
+print("Diptera")
+c<-sum(App1r5d$propinf<1)
+d<-sum(App1r5d$propinf<0.5)
+d/c
+print("Hemiptera")
+e<- sum(App1r5He$propinf<1)
+f<-sum(App1r5He$propinf<0.5)
+f/e
+print("Hymenoptera")
+g<-sum(App1r5Hy$propinf<1)
+h<-sum(App1r5Hy$propinf<0.5)
+h/g
+print("Siphonaptera")
+i<-sum(App1r5si$propinf<1)
+j<-sum(App1r5si$propinf<0.5)
+j/i
+
+###################################################
+#################Second batch of models############
+###################################################
+m2r <- brm(Infected|trials(Total)~Order+(1|spp),
+           data=App1r,family=binomial(link="logit"),
+           prior=c(prior(normal(0,2),class="Intercept"),
+                   prior(cauchy(0,1),class="sd"),
+                   prior(normal(0,2),class="b")),
+           chains=4,iter=2000)
+m2postr<-posterior_samples(m2r)
+m2margr<-marginal_effects(m2r,robust=FALSE)
+m2margr<-as.data.frame(m2margr$Order)
+
+#this will make a graph based on just the multilevel model
+m2pr<-ggplot()
+multi1r<- m2pr+geom_pointrange(data=m2margr,aes(x=Order,y=estimate__,ymin=lower__,ymax=upper__)) +
+  xlab("Order") +
+  theme(axis.text.x=element_text(size=8,angle=90),axis.title.y=element_text(size=8)) +
+  ylab("Proportion of Individuals Infected (mean +/- 95% Credible Interval)") +
+  ylim(c(0,1))+
+  ggtitle("Multi-level model")
+multi1r
+#Everything below will recreate the results from sazama et al 2017 but for all orders
+#Archaeognatha will not run because there is only one sample
+#blattaria
+d3rblat<-App1r[App1r$Order=="Blattaria",]
+d3rblat<- as.data.frame(d3rblat)
+d3rblat$Infected <- as.integer(d3rblat$Infected)
+d3rblat$Total <- as.integer(d3rblat$Total)
+m5.blat<-map2stan(
+  alist(
+    Infected~dbetabinom(Total,pbar,theta),
+    logit(pbar)<-a,
+    a~dnorm(0,3),
+    theta~dexp(1)
+  ),
+  data=d3rblat,
+  constraints=list(theta="lower=0"),
+  start=list(theta=3),
+  warmup=2000,iter=4000,chains=4)
+plot(m5.blat)
+precis(m5.blat,prob=.95,depth=2)
+postblat<-extract.samples(m5.blat)
+p_blat<-mean(logistic(postblat$a))
+plow_blat<-quantile(logistic(postblat$a),prob=0.025)
+phigh_blat<-quantile(logistic(postblat$a),prob=0.975)
+t_blat<-mean(postblat$theta)
+list(c(1-pbeta(0.001,p_blat*t_blat,(1-p_blat)*t_blat),
+       1-pbeta(0.001,plow_blat*t_blat,(1-plow_blat)*t_blat),
+       1-pbeta(0.001,phigh_blat*t_blat,(1-phigh_blat)*t_blat)))
+####Coleoptera###
+#################################
+d3rcol<-App1r[App1r$Order=="Coleoptera",]
+d3rcol<- as.data.frame(d3rcol)
+d3rcol$Infected <- as.integer(d3rcol$Infected)
+d3rcol$Total <- as.integer(d3rcol$Total)
+m5.col<-map2stan(
+  alist(
+    Infected~dbetabinom(Total,pbar,theta),
+    logit(pbar)<-a,
+    a~dnorm(0,3),
+    theta~dexp(1)
+  ),
+  data=d3rcol,
+  constraints=list(theta="lower=0"),
+  start=list(theta=3),
+  warmup=2000,iter=4000,chains=4)
+plot(m5.col)
+precis(m5.col,prob=.95,depth=2)
+postcol<-extract.samples(m5.col)
+p_col<-mean(logistic(postcol$a))
+plow_col<-quantile(logistic(postcol$a),prob=0.025)
+phigh_col<-quantile(logistic(postcol$a),prob=0.975)
+t_col<-mean(postcol$theta)
+list(c(1-pbeta(0.001,p_col*t_col,(1-p_col)*t_col),
+       1-pbeta(0.001,plow_col*t_col,(1-plow_col)*t_col),
+       1-pbeta(0.001,phigh_col*t_col,(1-phigh_col)*t_col)))
+#Dermaptera
+#won't work because there is only 1 dermaptera
+#create dataframe from data in sazama et al 2017
+#diptera
+d3rdip<-App1r[App1r$Order=="Diptera",]
+#if I need to do this just for aquatics then I need 
+#to subset the data further into aquatics only
+#d3rdip<-d3rdip[d3rdip$AT=="aquatic",]
+d3rdip<- as.data.frame(d3rdip)
+d3rdip$Infected <- as.integer(d3rdip$Infected)
+d3rdip$Total <- as.integer(d3rdip$Total)
+m5.dip<-map2stan(
+  alist(
+    Infected~dbetabinom(Total,pbar,theta),
+    logit(pbar)<-a,
+    a~dnorm(0,3),
+    theta~dexp(1)
+  ),
+  data=d3rdip,
+  constraints=list(theta="lower=0"),
+  start=list(theta=3),
+  warmup=2000,iter=4000,chains=4)
+plot(m5.dip)
+precis(m5.dip,prob=.95,depth=2)
+postdip<-extract.samples(m5.dip)
+p_dip<-mean(logistic(postdip$a))
+plow_dip<-quantile(logistic(postdip$a),prob=0.025)
+phigh_dip<-quantile(logistic(postdip$a),prob=0.975)
+t_dip<-mean(postdip$theta)
+list(c(1-pbeta(0.001,p_dip*t_dip,(1-p_dip)*t_dip),
+       1-pbeta(0.001,plow_dip*t_dip,(1-plow_dip)*t_dip),
+       1-pbeta(0.001,phigh_dip*t_dip,(1-phigh_dip)*t_dip)))
+
+quantile(logistic(postdip$a))
+####Ephemeroptera###
+#there are no ephem in rickettsia
+####Hemiptera###
+#################################
+d3rhem<-App1r[App1r$Order=="Hemiptera",]
+d3rhem<- as.data.frame(d3rhem)
+d3rhem$Infected <- as.integer(d3rhem$Infected)
+d3rhem$Total <- as.integer(d3rhem$Total)
+m5.hem<-map2stan(
+  alist(
+    Infected~dbetabinom(Total,pbar,theta),
+    logit(pbar)<-a,
+    a~dnorm(0,3),
+    theta~dexp(1)
+  ),
+  data=d3rhem,
+  constraints=list(theta="lower=0"),
+  start=list(theta=3),
+  warmup=2000,iter=4000,chains=4)
+plot(m5.hem)
+precis(m5.hem,prob=.95,depth=2)
+posthem<-extract.samples(m5.hem)
+p_hem<-mean(logistic(posthem$a))
+plow_hem<-quantile(logistic(posthem$a),prob=0.025)
+phigh_hem<-quantile(logistic(posthem$a),prob=0.975)
+t_hem<-mean(posthem$theta)
+list(c(1-pbeta(0.001,p_hem*t_hem,(1-p_hem)*t_hem),
+       1-pbeta(0.001,plow_hem*t_hem,(1-plow_hem)*t_hem),
+       1-pbeta(0.001,phigh_hem*t_hem,(1-phigh_hem)*t_hem)))
+####Hymenoptera###
+#################################
+d3rhym<-App1r[App1r$Order=="Hymenoptera",]
+d3rhym<- as.data.frame(d3rhym)
+d3rhym$Infected <- as.integer(d3rhym$Infected)
+d3rhym$Total <- as.integer(d3rhym$Total)
+m5.hym<-map2stan(
+  alist(
+    Infected~dbetabinom(Total,pbar,theta),
+    logit(pbar)<-a,
+    a~dnorm(0,3),
+    theta~dexp(1)
+  ),
+  data=d3rhym,
+  constraints=list(theta="lower=0"),
+  start=list(theta=3),
+  warmup=2000,iter=4000,chains=4)
+plot(m5.hym)
+precis(m5.hym,prob=.95,depth=2)
+posthym<-extract.samples(m5.hym)
+p_hym<-mean(logistic(posthym$a))
+plow_hym<-quantile(logistic(posthym$a),prob=0.025)
+phigh_hym<-quantile(logistic(posthym$a),prob=0.975)
+theta<-mean(posthym$theta)
+list(c(1-pbeta(0.001,p_hym*theta,(1-p_hym)*theta),
+       1-pbeta(0.001,plow_hym*theta,(1-plow_hym)*theta),
+       1-pbeta(0.001,phigh_hym*theta,(1-phigh_hym)*theta)))
+####isoptera###
+#there are no iso in rickettsia
+####Lepidoptera###
+#################################
+d3rlep<-App1r[App1r$Order=="Lepidoptera",]
+d3rlep<- as.data.frame(d3rlep)
+d3rlep$Infected <- as.integer(d3rlep$Infected)
+d3rlep$Total <- as.integer(d3rlep$Total)
+m5.lep<-map2stan(
+  alist(
+    Infected~dbetabinom(Total,pbar,theta),
+    logit(pbar)<-a,
+    a~dnorm(0,3),
+    theta~dexp(1)
+  ),
+  data=d3rlep,
+  constraints=list(theta="lower=0"),
+  start=list(theta=3),
+  warmup=2000,iter=4000,chains=4)
+plot(m5.lep)
+precis(m5.lep,prob=.95,depth=2)
+postlep<-extract.samples(m5.lep)
+p_lep<-mean(logistic(postlep$a))
+plow_lep<-quantile(logistic(postlep$a),prob=0.025)
+phigh_lep<-quantile(logistic(postlep$a),prob=0.975)
+t_lep<-mean(postlep$theta)
+list(c(1-pbeta(0.001,p_lep*t_lep,(1-p_lep)*t_lep),
+       1-pbeta(0.001,plow_lep*t_lep,(1-plow_lep)*t_lep),
+       1-pbeta(0.001,phigh_lep*t_lep,(1-phigh_lep)*t_lep)))
+####Mantodea###
+#################################
+d3rman<-App1r[App1r$Order=="Mantodea",]
+d3rman<- as.data.frame(d3rman)
+d3rman$Infected <- as.integer(d3rman$Infected)
+d3rman$Total <- as.integer(d3rman$Total)
+m5.man<-map2stan(
+  alist(
+    Infected~dbetabinom(Total,pbar,theta),
+    logit(pbar)<-a,
+    a~dnorm(0,3),
+    theta~dexp(1)
+  ),
+  data=d3rman,
+  constraints=list(theta="lower=0"),
+  start=list(theta=3),
+  warmup=2000,iter=4000,chains=4)
+plot(m5.man)
+precis(m5.man,prob=.95,depth=2)
+postman<-extract.samples(m5.man)
+p_man<-mean(logistic(postman$a))
+plow_man<-quantile(logistic(postman$a),prob=0.025)
+phigh_man<-quantile(logistic(postman$a),prob=0.975)
+t_man<-mean(postman$theta)
+list(c(1-pbeta(0.001,p_man*t_man,(1-p_man)*t_man),
+       1-pbeta(0.001,plow_man*t_man,(1-plow_man)*t_man),
+       1-pbeta(0.001,phigh_man*t_man,(1-phigh_man)*t_man)))
+####Mecoptera###
+#################################
+#only one individual and species so it won't work
+####Megaloptera###
+#################################
+#only one individual and species so it won't work
+####Neuroptera###
+#################################
+d3rneu<-App1r[App1r$Order=="Neuroptera",]
+d3rneu<- as.data.frame(d3rneu)
+d3rneu$Infected <- as.integer(d3rneu$Infected)
+d3rneu$Total <- as.integer(d3rneu$Total)
+m5.neu<-map2stan(
+  alist(
+    Infected~dbetabinom(Total,pbar,theta),
+    logit(pbar)<-a,
+    a~dnorm(0,3),
+    theta~dexp(1)
+  ),
+  data=d3rneu,
+  constraints=list(theta="lower=0"),
+  start=list(theta=3),
+  warmup=2000,iter=4000,chains=4)
+plot(m5.neu)
+precis(m5.neu,prob=.95,depth=2)
+postneu<-extract.samples(m5.neu)
+p_neu<-mean(logistic(postneu$a))
+plow_neu<-quantile(logistic(postneu$a),prob=0.025)
+phigh_neu<-quantile(logistic(postneu$a),prob=0.975)
+t_neu<-mean(postneu$theta)
+list(c(1-pbeta(0.001,p_neu*t_neu,(1-p_neu)*t_neu),
+       1-pbeta(0.001,plow_neu*t_neu,(1-plow_neu)*t_neu),
+       1-pbeta(0.001,phigh_neu*t_neu,(1-phigh_neu)*t_neu)))
+####Odonata###
+#################################
+#won't work because there is only one odo
+####Orthoptera###
+#################################
+d3rort<-App1r[App1r$Order=="Orthoptera",]
+d3rort<- as.data.frame(d3rort)
+d3rort$Infected <- as.integer(d3rort$Infected)
+d3rort$Total <- as.integer(d3rort$Total)
+m5.ort<-map2stan(
+  alist(
+    Infected~dbetabinom(Total,pbar,theta),
+    logit(pbar)<-a,
+    a~dnorm(0,3),
+    theta~dexp(1)
+  ),
+  data=d3rort,
+  constraints=list(theta="lower=0"),
+  start=list(theta=3),
+  warmup=2000,iter=4000,chains=4)
+plot(m5.ort)
+precis(m5.ort,prob=.95,depth=2)
+postort<-extract.samples(m5.ort)
+p_ort<-mean(logistic(postort$a))
+plow_ort<-quantile(logistic(postort$a),prob=0.025)
+phigh_ort<-quantile(logistic(postort$a),prob=0.975)
+t_ort<-mean(postort$theta)
+list(c(1-pbeta(0.001,p_ort*t_ort,(1-p_ort)*t_ort),
+       1-pbeta(0.001,plow_ort*t_ort,(1-plow_ort)*t_ort),
+       1-pbeta(0.001,phigh_ort*t_ort,(1-phigh_ort)*t_ort)))
+
+####psocodea###
+#################################
+d3rpso<-App1r[App1r$Order=="Psocodea",]
+d3rpso<- as.data.frame(d3rpso)
+d3rpso$Infected <- as.integer(d3rpso$Infected)
+d3rpso$Total <- as.integer(d3rpso$Total)
+m5.pso<-map2stan(
+  alist(
+    Infected~dbetabinom(Total,pbar,theta),
+    logit(pbar)<-a,
+    a~dnorm(0,3),
+    theta~dexp(1)
+  ),
+  data=d3rpso,
+  constraints=list(theta="lower=0"),
+  start=list(theta=3),
+  warmup=2000,iter=4000,chains=4)
+plot(m5.pso)
+precis(m5.pso,prob=.95,depth=2)
+postpso<-extract.samples(m5.pso)
+p_pso<-mean(logistic(postpso$a))
+plow_pso<-quantile(logistic(postpso$a),prob=0.025)
+phigh_pso<-quantile(logistic(postpso$a),prob=0.975)
+t_pso<-mean(postpso$theta)
+list(c(1-pbeta(0.001,p_pso*t_pso,(1-p_pso)*t_pso),
+       1-pbeta(0.001,plow_pso*t_pso,(1-plow_pso)*t_pso),
+       1-pbeta(0.001,phigh_pso*t_pso,(1-phigh_pso)*t_pso)))
+####raphidioptera###
+#################################
+#doesn't work because there is only one individual
+####Siphonaptera###
+#################################
+d3rsip<-App1r[App1r$Order=="Siphonaptera",]
+d3rsip<- as.data.frame(d3rsip)
+d3rsip$Infected <- as.integer(d3rsip$Infected)
+d3rsip$Total <- as.integer(d3rsip$Total)
+m5.sip<-map2stan(
+  alist(
+    Infected~dbetabinom(Total,pbar,theta),
+    logit(pbar)<-a,
+    a~dnorm(0,3),
+    theta~dexp(1)
+  ),
+  data=d3rsip,
+  constraints=list(theta="lower=0"),
+  start=list(theta=3),
+  warmup=2000,iter=4000,chains=4)
+plot(m5.sip)
+precis(m5.sip,prob=.95,depth=2)
+postsip<-extract.samples(m5.sip)
+p_sip<-mean(logistic(postsip$a))
+plow_sip<-quantile(logistic(postsip$a),prob=0.025)
+phigh_sip<-quantile(logistic(postsip$a),prob=0.975)
+t_sip<-mean(postsip$theta)
+list(c(1-pbeta(0.001,p_sip*t_sip,(1-p_sip)*t_sip),
+       1-pbeta(0.001,plow_sip*t_sip,(1-plow_sip)*t_sip),
+       1-pbeta(0.001,phigh_sip*t_sip,(1-phigh_sip)*t_sip)))
+
+####Thysanoptera###
+#################################
+#Thysanoptera won't work because there is only one obs.
+####Trichoptera###
+#make new dataframes with all the orders
+#Archaeognatha
+#nothing here
+#blattaria
+blat <- data.frame(Order = "Blattaria")
+blat$mean<-mean(logistic(postblat$a))
+blat$low<-quantile(logistic(postblat$a),prob=0.025)
+blat$high<-quantile(logistic(postblat$a),prob=0.975)
+blat$theta<- mean(postblat$theta)
+blat$mean2<-(1-pbeta(0.001,blat$mean*blat$theta,(1-blat$mean)*blat$theta))
+blat$low2 <- 1-pbeta(0.001,blat$low*blat$theta,(1-blat$low)*blat$theta)
+blat$high2 <- 1-pbeta(0.001,blat$high*blat$theta,(1-blat$high)*blat$theta)
+#coleoptera
+coleo <- data.frame(Order = "Coleoptera")
+coleo$mean<-mean(logistic(postcol$a))
+coleo$low<-quantile(logistic(postcol$a),prob=0.025)
+coleo$high<-quantile(logistic(postcol$a),prob=0.975)
+coleo$theta<- mean(postcol$theta)
+coleo$mean2<-(1-pbeta(0.001,coleo$mean*coleo$theta,(1-coleo$mean)*coleo$theta))
+coleo$low2 <- 1-pbeta(0.001,coleo$low*coleo$theta,(1-coleo$low)*coleo$theta)
+coleo$high2 <- 1-pbeta(0.001,coleo$high*coleo$theta,(1-coleo$high)*coleo$theta)
+#Diptera
+dip <- data.frame(Order = "Diptera")
+dip$mean<-mean(logistic(postdip$a))
+dip$low<-quantile(logistic(postdip$a),prob=0.025)
+dip$high<-quantile(logistic(postdip$a),prob=0.975)
+dip$theta<- mean(postdip$theta)
+dip$mean2<-(1-pbeta(0.001,dip$mean*dip$theta,(1-dip$mean)*dip$theta))
+dip$low2 <- 1-pbeta(0.001,dip$low*dip$theta,(1-dip$low)*dip$theta)
+dip$high2 <- 1-pbeta(0.001,dip$high*dip$theta,(1-dip$high)*dip$theta)
+#Ephemeroptera
+#Hemiptera
+hem <- data.frame(Order = "Hemiptera")
+hem$mean<-mean(logistic(posthem$a))
+hem$low<-quantile(logistic(posthem$a),prob=0.025)
+hem$high<-quantile(logistic(posthem$a),prob=0.975)
+hem$theta<- mean(posthem$theta)
+hem$mean2<-(1-pbeta(0.001,hem$mean*hem$theta,(1-hem$mean)*hem$theta))
+hem$low2 <- 1-pbeta(0.001,hem$low*hem$theta,(1-hem$low)*hem$theta)
+hem$high2 <- 1-pbeta(0.001,hem$high*hem$theta,(1-hem$high)*hem$theta)
+#Hymenoptera
+hym <- data.frame(Order = "Hymenoptera")
+hym$mean<-mean(logistic(posthym$a))
+hym$low<-quantile(logistic(posthym$a),prob=0.025)
+hym$high<-quantile(logistic(posthym$a),prob=0.975)
+hym$theta<- mean(posthym$theta)
+hym$mean2<-(1-pbeta(0.001,hym$mean*hym$theta,(1-hym$mean)*hym$theta))
+hym$low2 <- 1-pbeta(0.001,hym$low*hym$theta,(1-hym$low)*hym$theta)
+hym$high2 <- 1-pbeta(0.001,hym$high*hym$theta,(1-hym$high)*hym$theta)
+#Isoptera
+#Lepidoptera
+lep <- data.frame(Order = "Lepidoptera")
+lep$mean<-mean(logistic(postlep$a))
+lep$low<-quantile(logistic(postlep$a),prob=0.025)
+lep$high<-quantile(logistic(postlep$a),prob=0.975)
+lep$theta<- mean(postlep$theta)
+lep$mean2<-(1-pbeta(0.001,lep$mean*lep$theta,(1-lep$mean)*lep$theta))
+lep$low2 <- 1-pbeta(0.001,lep$low*lep$theta,(1-lep$low)*lep$theta)
+lep$high2 <- 1-pbeta(0.001,lep$high*lep$theta,(1-lep$high)*lep$theta)
+#Mantodea
+man <- data.frame(Order = "Mantodea")
+man$mean<-mean(logistic(postman$a))
+man$low<-quantile(logistic(postman$a),prob=0.025)
+man$high<-quantile(logistic(postman$a),prob=0.975)
+man$theta<- mean(postman$theta)
+man$mean2<-(1-pbeta(0.001,man$mean*man$theta,(1-man$mean)*man$theta))
+man$low2 <- 1-pbeta(0.001,man$low*man$theta,(1-man$low)*man$theta)
+man$high2 <- 1-pbeta(0.001,man$high*man$theta,(1-man$high)*man$theta)
+#Mecoptera
+#there are not enough samples
+#Megaloptera
+#there are not enough samples
+#Neuroptera
+neu <- data.frame(Order = "Neuroptera")
+neu$mean<-mean(logistic(postneu$a))
+neu$low<-quantile(logistic(postneu$a),prob=0.025)
+neu$high<-quantile(logistic(postneu$a),prob=0.975)
+neu$theta<- mean(postneu$theta)
+neu$mean2<-(1-pbeta(0.001,neu$mean*neu$theta,(1-neu$mean)*neu$theta))
+neu$low2 <- 1-pbeta(0.001,neu$low*neu$theta,(1-neu$low)*neu$theta)
+neu$high2 <- 1-pbeta(0.001,neu$high*neu$theta,(1-neu$high)*neu$theta)
+#Odonata
+#Orthoptera
+ort <- data.frame(Order = "Orthoptera")
+ort$mean<-mean(logistic(postort$a))
+ort$low<-quantile(logistic(postort$a),prob=0.025)
+ort$high<-quantile(logistic(postort$a),prob=0.975)
+ort$theta<- mean(postort$theta)
+ort$mean2<-(1-pbeta(0.001,ort$mean*ort$theta,(1-ort$mean)*ort$theta))
+ort$low2 <- 1-pbeta(0.001,ort$low*ort$theta,(1-ort$low)*ort$theta)
+ort$high2 <- 1-pbeta(0.001,ort$high*ort$theta,(1-ort$high)*ort$theta)
+#Phasmida
+#Psocodea
+pso <- data.frame(Order = "Psocodea")
+pso$mean<-mean(logistic(postpso$a))
+pso$low<-quantile(logistic(postpso$a),prob=0.025)
+pso$high<-quantile(logistic(postpso$a),prob=0.975)
+pso$theta<- mean(postpso$theta)
+pso$mean2<-(1-pbeta(0.001,pso$mean*pso$theta,(1-pso$mean)*pso$theta))
+pso$low2 <- 1-pbeta(0.001,pso$low*pso$theta,(1-pso$low)*pso$theta)
+pso$high2 <- 1-pbeta(0.001,pso$high*pso$theta,(1-pso$high)*pso$theta)
+#Raphidioptera
+#Siphonaptera
+sip <- data.frame(Order = "Siphonaptera")
+sip$mean<-mean(logistic(postsip$a))
+sip$low<-quantile(logistic(postsip$a),prob=0.025)
+sip$high<-quantile(logistic(postsip$a),prob=0.975)
+sip$theta<- mean(postsip$theta)
+sip$mean2<-(1-pbeta(0.001,sip$mean*sip$theta,(1-sip$mean)*sip$theta))
+sip$low2 <- 1-pbeta(0.001,sip$low*sip$theta,(1-sip$low)*sip$theta)
+sip$high2 <- 1-pbeta(0.001,sip$high*sip$theta,(1-sip$high)*sip$theta)
+#Strepsiptera
+#Thysanoptera #there is only one here
+#Trichoptera
+
+blat <-as.data.frame(blat)
+coleo <-as.data.frame(coleo)
+dip<-as.data.frame(dip)
+lep<-as.data.frame(lep)
+man<-as.data.frame(man)
+neu<-as.data.frame(neu)
+ort<-as.data.frame(ort)
+pso<-as.data.frame(pso)
+sip<-as.data.frame(sip)
+#combines all data frames into one dataframe
+totaldfr <- rbind.data.frame(blat,coleo,
+                             dip,hem,hym,
+                             lep,man,neu,
+                             ort,pso,sip)
+#multi level model plot with among species on top
+#Also adding an analysis of the orders, but with only those with more than 5
+#individuals sampled
+m5r <- brm(Infected|trials(Total)~Order+(1|spp),data=App1r.5r,family=binomial(link="logit"),
+           prior=c(prior(normal(0,2),class="Intercept"),
+                   prior(cauchy(0,1),class="sd"),
+                   prior(normal(0,2),class="b")),
+           chains=4,iter=2000)
+m5postr<-posterior_samples(m5r)
+colmr<-mean(logistic(m5postr$b_Intercept+m5postr$b_OrderColeoptera))
+dermr<-mean(logistic(m5postr$b_Intercept+m5postr$b_OrderDermaptera))
+dipmr<-mean(logistic(m5postr$b_Intercept+m5postr$b_OrderDiptera))
+hemmr<-mean(logistic(m5postr$b_Intercept+m5postr$b_OrderHemiptera))
+hymmr<-mean(logistic(m5postr$b_Intercept+m5postr$b_OrderHymenoptera))
+lepmr<-mean(logistic(m5postr$b_Intercept+m5postr$b_OrderLepidoptera))
+manmr<-mean(logistic(m5postr$b_Intercept+m5postr$b_OrderMantodea))
+odomr<-mean(logistic(m5postr$b_Intercept+m5postr$b_OrderOdonata))
+ortmr<-mean(logistic(m5postr$b_Intercept+m5postr$b_OrderOrthoptera))
+sipmr<-mean(logistic(m5postr$b_Intercept+m5postr$b_OrderSiphonaptera))
+
+bigoner<- rbind(colmr,dermr,dipmr,hemmr,hymmr,
+                lepmr,manmr,odomr,ortmr,
+                sipmr)
+bigoner<- as.data.frame(bigoner)
+bigoner$Order <- list("Coleoptera","Dermaptera","Diptera",
+                      "Hemiptera","Hymenoptera","Lepidoptera",
+                      "Mantodea",
+                      "Odonata","Orthoptera",
+                      "Siphonaptera")
+bigoner$Order<-as.character(bigoner$Order)
+colnames(bigoner)[colnames(bigoner)=="V1"] <- "mean"
+colpir<-PI((logistic(m5postr$b_Intercept+m5postr$b_OrderColeoptera)),prob=0.95)
+derpir<-PI(logistic(m5postr$b_Intercept+m5postr$b_OrderDermaptera),prob=0.95)
+dippir<-PI(logistic(m5postr$b_Intercept+m5postr$b_OrderDiptera),prob=0.95)
+hempir<-PI(logistic(m5postr$b_Intercept+m5postr$b_OrderHemiptera),prob=0.95)
+hympir<-PI(logistic(m5postr$b_Intercept+m5postr$b_OrderHymenoptera),prob=0.95)
+leppir<-PI(logistic(m5postr$b_Intercept+m5postr$b_OrderLepidoptera),prob=0.95)
+manpir<-PI(logistic(m5postr$b_Intercept+m5postr$b_OrderMantodea),prob=0.95)
+odopir<-PI(logistic(m5postr$b_Intercept+m5postr$b_OrderOdonata),prob=0.95)
+ortpir<-PI(logistic(m5postr$b_Intercept+m5postr$b_OrderOrthoptera),prob=0.95)
+sippir<-PI(logistic(m5postr$b_Intercept+m5postr$b_OrderSiphonaptera),prob=0.95)
+
+PIr <- rbind(colpir,derpir,dippir,hempir,hympir,leppir,manpir,
+            odopir,ortpir,sippir)
+PIr<-as.data.frame(PIr)
+PIr$Order <- list("Coleoptera","Dermaptera","Diptera",
+                 "Hemiptera","Hymenoptera","Lepidoptera","Mantodea",
+                 "Odonata","Orthoptera",
+                 "Siphonaptera")
+colnames(PIr)[colnames(PIr)=="3%"] <- "Lower"
+colnames(PIr)[colnames(PIr)=="98%"] <- "Upper"
+newbier <- join(bigoner,PIr,by="Order",type="left",
+                match="first")
+#this will make a graph based on just the multilevel model
+#checking manual results
+cpr <- ggplot()
+combinedr <- cpr+geom_pointrange(data=m2margr,
+                               position=position_nudge(-0.3),
+                               mapping=aes(x=reorder(Order,-estimate__),
+                                           y=estimate__,
+                                           ymin=lower__,
+                                           ymax=upper__,
+                                           color="black"),
+                               shape=17) +
+  theme(plot.title=element_text(size=10,face="italic"),
+        axis.text.x=element_text(size=8,angle=90),
+        axis.title.y=element_blank(),
+        axis.title.x=element_blank()) +
+          ylim(c(0,1))+
+  ggtitle("Rickettsia") +
+  geom_pointrange(data=totaldfr,
+                  mapping=aes(x=Order,
+                              y=mean2,
+                              ymin=low2,
+                              ymax=high2,
+                              color="red"),
+                  shape=17)+
+  geom_pointrange(data=newbier,position=position_nudge(0.3),
+                  mapping=aes(x=Order,y=mean,
+                              ymin=Lower,ymax=Upper,color="Gray30"),
+                  shape=17)+
+  scale_color_manual(values=c("black","Gray50","red"),
+                     name=NULL,
+                     labels=c("Multi-level Total",
+                              "Multi-level >5",
+                              "Among Species"))+
+  theme(legend.text=element_text(size=10))
+combinedr
+
+ggsave("Figure3r.tiff",plot=combinedr,
+       width=9,height=9,dpi=300)
+#Now to get cardinium groups
+#Cardinium
+Appendix1card<- subset(Appendix1, Appendix1$Bacterium == "Cardinium",
+                       select = c(Class,Order, Family, Genus, Species,
+                                  spp, Total, Infected,Bacterium))
+#remove duplicates in the database
+#this one works as a roundabout way of doing it
+#cardinium
+Appendix1.1c <- Appendix1card %>%
+  group_by(spp) %>%
+  summarise_each(funs(sum),Total,Infected)
+#creating a second table of the same data to join to for the lost
+#information
+#Removing these columns sinnce I don't need them
+Appendix2c <- Appendix1card
+#creating a table of just the names so i can join them back
+Appendix2c$Total <- NULL
+Appendix2c$Infected <- NULL
+#joins the two tables so that it's all in one table
+#cardinium
+App1c <- join(Appendix1.1c,Appendix2c,by="spp",type="left",
+              match="first")
+#sorts by spp to help with analyphs later
+App1c <- App1c %>%
+  select(Class,Order,Family,
+         Genus,Species,spp,Total,Infected,Bacterium) %>%
+  arrange(spp)
+#Make Total and Infected integers for the model
+App1c$Total <- as.integer(App1c$Total)
+App1c$Infected <- as.integer(App1c$Infected)
+App1c <- as.data.frame(App1c)
+###############################################
+#Now to do the model
+###############################################
+#do the model 
+model1c <- map2stan(
+  alist(
+    Infected ~ dbinom(Total, p) ,
+    logit(p) <- a_spp[spp] ,
+    a_spp[spp] ~ dnorm(a,phgma), 
+    a ~ dnorm(0,1) ,
+    phgma ~ dcauchy(0,1)
+  ), data=App1c, iter=4000,chains=4)
+summary(model1c)
+#extract samples into a database
+postbothc <- extract.samples(model1c)
+#find the mean of the samples
+App1c$propinf <- logistic(apply(postbothc$a_spp, 2, mean))
+#Find the 95% credible intervals
+bothPI.estc <- logistic(apply(postbothc$a_spp, 2, quantile, probs=c(0.025,0.975)))
+#transpose so that the rows become columns
+bothPI.estc<- t(bothPI.estc)
+#Make into a dataframe so that we can add to the other dataframe
+bothPI.estc <- as.data.frame(bothPI.estc)
+#Add to App1c
+App1c$`0.03` <- bothPI.estc[,1]
+App1c$`0.98` <- bothPI.estc[,2]
+App1c$Distancebetween <- App1c$`0.98` - App1c$`0.03`
+#Capitalize all of AT
+#the weinert paper does not distinguish between A or T so 
+#I don't here
+################################################
+########Now for the Figures#####################
+################################################
+#this is figure 1 of the supplemental data
+totc <- ggplot(data=App1c, aes(reorder(spp,propinf,sum),y=propinf))
+
+myplotc<- totc + geom_point(size=.5) +
+  theme(plot.title = element_text(hjust=0.5),
+        axis.ticks= element_blank(),axis.text.x=element_blank()) +
+  xlab("Species") +
+  ylab("Proportion Infected (mean +/- 95% Credible Interval)") +
+  ggtitle("Estimated Proportion of Infected Individuals per Species (Rickettsia)") +
+  scale_x_discrete(name="Species",breaks=NULL) +
+  geom_errorbar(aes(ymin=App1c$`0.03`,ymax=App1c$`0.98`),alpha=0.2)
+ggsave("extratrial2c.tiff",plot=myplotc,width=5,height=5,dpi=300)
+
+#this is not a figure of the manuscript. 
+#It's just a figure of more than 5 tested and uninfected
+#I chose >5 because it looked the best
+App1c.5c <- subset(App1c, Total >5, select = c(Class,Order,Family,
+                                               Genus, Species,
+                                               spp, Total,
+                                               Infected, propinf,
+                                               `0.03`, `0.98`, 
+                                               `Distancebetween`))
+#Figure 1 is >5 and >0.001 of propinf
+App1c5infc <- subset(App1c.5c, App1c.5c$propinf >0.001,
+                     select = c(Class,Order, Family, Genus, Species,
+                                spp, Total, Infected, 
+                                propinf, `0.03`, `0.98`,
+                                `Distancebetween`))
+tot5infc <- ggplot(data=App1c5infc,
+                   aes(reorder(spp,propinf,sum),y=propinf))
+
+myplotinfc <- tot5infc + geom_point(alpha=.8,size=.5) +
+  theme(plot.title = element_text(hjust=0.5),
+        axis.ticks= element_blank(), 
+        axis.text.x=element_blank()) +
+  xlab("Species") +
+  ylab("Proportion Infected (mean +/- 95% Credible Interval)") +
+  ggtitle("Estimated Proportion of Infected Individuals per Species (>5 Individuals)") +
+  scale_x_discrete(name="Species",breaks=NULL) +
+  geom_errorbar(aes(ymin=App1c5infc$`0.03`,ymax=App1c5infc$`0.98`),
+                alpha=0.5)
+ggsave("Figure1c.tiff",plot=myplotinfc,width=5,height=5,dpi=150)
+#Panels of histograms
+histoall <- ggplot(data=App1combined.5,aes(propinf))
+histall <- histoall + geom_histogram(breaks=seq(0,1,by=0.1)) +
+  facet_wrap(~factor(Bacterium,levels=c("Wolbachia",
+                                  "Rickettsia",
+                                  "Cardinium"))) +
+  labs(x="Proportion Infected",y=NULL)+
+  labs(title="Distribution of Proportions within infected groups") +
+  theme(plot.title = element_text(hjust=0.5),
+        axis.text.x=element_text(size=7))
+histall
+ggsave("Supplementalhistoall.tiff",plot=histall,width=5,height=2,dpi=150)
+#Alternate histoall
+histall2 <- grid.arrange(
+  histow,histor,histoc,
+  nrow=3,
+  top="Distribution of Proportions Within Infected Groups",
+  bottom="Proportion Infected")
+histall2
+ggsave("Supplementalhistoall2.tiff",plot=histall2,width=3,height=5,dpi=150)
+
+#I like this graph, but the different y-axis scales seems shady
+#Perhaps try a relative frequency histogram?
+#######################################################
+###########The App1c graph############################
+#######################################################
+#option 1. the long way
+#first need to make an App1c df of just infected
+App1infc<- subset(App1c,
+                  propinf>0.001, 
+                  select = c(Class,Order, Family,
+                             Genus, Species,
+                             spp, Total, Infected, 
+                             propinf, `0.03`, `0.98`, 
+                             `Distancebetween`,Bacterium))
+##################Blattaria#############
+#subsets those data with all species within the order Blattaria
+App1cb <- subset(App1infc,
+                 Order == "Blattaria",
+                 select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+#subsets data with all species with more than 1 individual tested
+App1c1b <- subset(App1cb,
+                  Total >1,
+                  select = c(Order,spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+#subsets data with all species with more than 5 individual tested
+App1c5b <- subset(App1cb, Total >5, 
+                  select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+#subsets data with all species with more than 10 individual tested
+App1c10b <- subset(App1cb, Total >10,
+                   select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+#subsets data with all species with more than 20 individual tested
+App1c20b <- subset(App1cb, Total >20, 
+                   select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+##################Coleoptera#############
+#subsets those data with all species within the order Coleoptera
+App1cc <- subset(App1infc, Order == "Coleoptera", 
+                 select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+#subsets data with all species with more than 1 individual tested
+App1c1c <- subset(App1c, Total >1, 
+                  select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+#subsets data with all species with more than 5 individual tested
+App1c5c <- subset(App1c, Total >5, 
+                  select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+#subsets data with all species with more than 10 individual tested
+App1c10c <- subset(App1c, Total >10, 
+                   select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+#subsets data with all species with more than 20 individual tested
+App1c20c <- subset(App1c, Total >20, 
+                   select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+##############Diptera################
+#subsets those data with all species within the order Diptera
+App1cd <- subset(App1infc, Order == "Diptera", 
+                 select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+#subsets data with all species with more than 1 individual tested
+App1c1d <- subset(App1cd, Total >1, 
+                  select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+#subsets data with all species with more than 5 individual tested
+App1c5d <- subset(App1cd, Total >5, 
+                  select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+#subsets data with all species with more than 10 individual tested
+App1c10d <- subset(App1cd, Total >10, 
+                   select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+#subsets data with all species with more than 20 individual tested
+App1c20d <- subset(App1cd, Total >20, 
+                   select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+############Ephemeroptera###############
+#no ephem
+############Hemiptera###############
+#subsets those data with all species within the order Hemiptera
+App1cHe <- subset(App1infc, Order == "Hemiptera", 
+                  select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+#subsets data with all species with more than 1 individual tested
+App1c1He <- subset(App1cHe, Total >1, 
+                   select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+#subsets data with all species with more than 5 individual tested
+App1c5He <- subset(App1cHe, Total >5, 
+                   select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+#subsets data with all species with more than 10 individual tested
+App1c10He <- subset(App1cHe, Total >10, 
+                    select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+#subsets data with all species with more than 20 individual tested
+App1c20He <- subset(App1cHe, Total >20, 
+                    select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+############Hymenoptera###############
+#subsets those data with all species within the order Hymenoptera
+App1cHy <- subset(App1infc, Order == "Hymenoptera", 
+                  select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+#subsets data with all species with more than 1 individual tested
+App1c1Hy <- subset(App1cHy, Total >1, 
+                   select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+#subsets data with all species with more than 5 individual tested
+App1c5Hy <- subset(App1cHy, Total >5, 
+                   select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+#subsets data with all species with more than 10 individual tested
+App1c10Hy <- subset(App1cHy, Total >10, 
+                    select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+#subsets data with all species with more than 20 individual tested
+App1c20Hy <- subset(App1cHy, Total >20, 
+                    select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+############Isoptera###############
+#subsets those data with all species within the order Isoptera
+App1cI <- subset(App1infc, Order == "Isoptera", 
+                 select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+#subsets data with all species with more than 1 individual tested
+App1c1I <- subset(App1cI, Total >1, 
+                  select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+#subsets data with all species with more than 5 individual tested
+App1c5I <- subset(App1cI, Total >5, 
+                  select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+#subsets data with all species with more than 10 individual tested
+App1c10I <- subset(App1cI, Total >10, 
+                   select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+#subsets data with all species with more than 20 individual tested
+App1c20I <- subset(App1cI, Total >20, 
+                   select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+
+############Lepidoptera###############
+#subsets those data with all species within the order Lepidoptera
+App1cL <- subset(App1infc, Order == "Lepidoptera", 
+                 select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+#subsets data with all species with more than 1 individual tested
+App1c1L <- subset(App1cL, Total >1, 
+                  select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+#subsets data with all species with more than 5 individual tested
+App1c5L <- subset(App1cL, Total >5, 
+                  select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+#subsets data with all species with more than 10 individual tested
+App1c10L <- subset(App1cL, Total >10, 
+                   select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+#subsets data with all species with more than 20 individual tested
+App1c20L <- subset(App1cL, Total >20, 
+                   select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+############Neuroptera###############
+#subsets those data with all species within the order Neuroptera
+App1cN <- subset(App1infc, Order == "Neuroptera", 
+                 select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+#subsets data with all species with more than 1 individual tested
+App1c1N <- subset(App1cN, Total >1, 
+                  select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+#subsets data with all species with more than 5 individual tested
+App1c5N <- subset(App1cN, Total >5, 
+                  select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+#subsets data with all species with more than 10 individual tested
+App1c10N <- subset(App1cN, Total >10, 
+                   select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+#subsets data with all species with more than 20 individual tested
+App1c20N <- subset(App1cN, Total >20, 
+                   select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+
+############Odonata###############
+#no odonata
+############Orthoptera###############
+#subsets those data with all species within the order Orthoptera
+App1cor <- subset(App1infc, Order == "Orthoptera", 
+                  select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+#subsets data with all species with more than 1 individual tested
+App1c1or <- subset(App1cor, Total >1, 
+                   select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+#subsets data with all species with more than 5 individual tested
+App1c5or <- subset(App1cor, Total >5, 
+                   select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+#subsets data with all species with more than 10 individual tested
+App1c10or <- subset(App1cor, Total >10, 
+                    select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+#subsets data with all species with more than 20 individual tested
+App1c20or <- subset(App1cor, Total >20, 
+                    select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+############Phasmida###############
+#subsets those data with all species within the order Phasmida
+App1cph <- subset(App1infc, Order == "Phasmida", 
+                  select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+#subsets data with all species with more than 1 individual tested
+App1c1ph <- subset(App1cph, Total >1, 
+                   select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+#subsets data with all species with more than 5 individual tested
+App1c5ph <- subset(App1cph, Total >5, 
+                   select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+#subsets data with all species with more than 10 individual tested
+App1c10ph <- subset(App1cph, Total >10, 
+                    select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+#subsets data with all species with more than 20 individual tested
+App1c20ph <- subset(App1cph, Total >20, 
+                    select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+############Psocodea###############
+#subsets those data with all species within the order Psocodea
+App1cps <- subset(App1infc, Order == "Psocodea", 
+                  select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+#subsets data with all species with more than 1 individual tested
+App1c1ps <- subset(App1cps, Total >1, 
+                   select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+#subsets data with all species with more than 5 individual tested
+App1c5ps <- subset(App1cps, Total >5, 
+                   select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+#subsets data with all species with more than 10 individual tested
+App1c10ps <- subset(App1cps, Total >10, 
+                    select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+#subsets data with all species with more than 20 individual tested
+App1c20ps <- subset(App1cps, Total >20, 
+                    select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+############Raphidioptera###############
+#subsets those data with all species within the order Raphidioptera
+App1crap <- subset(App1infc, Order == "Raphidioptera", 
+                   select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+#subsets data with all species with more than 1 individual tested
+App1c1rap <- subset(App1crap, Total >1, 
+                    select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+#subsets data with all species with more than 5 individual tested
+App1c5rap <- subset(App1crap, Total >5, 
+                    select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+#subsets data with all species with more than 10 individual tested
+App1c10rap <- subset(App1crap, Total >10, 
+                     select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+#subsets data with all species with more than 20 individual tested
+App1c20rap <- subset(App1crap, Total >20, 
+                     select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+
+############Strepsiptera###############
+#subsets those data with all species within the order Strepsiptera
+App1cst <- subset(App1infc, Order == "Strepsiptera", 
+                  select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+#subsets data with all species with more than 1 individual tested
+App1c1st <- subset(App1cst, Total >1, 
+                   select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+#subsets data with all species with more than 5 individual tested
+App1c5st <- subset(App1cst, Total >5, 
+                   select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+#subsets data with all species with more than 10 individual tested
+App1c10st <- subset(App1cst, Total >10, 
+                    select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+#subsets data with all species with more than 20 individual tested
+App1c20st <- subset(App1cst, Total >20, 
+                    select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+############Thysanoptera###############
+#subsets those data with all species within the order Thysanoptera
+App1cthy <- subset(App1infc, Order == "Thysanoptera", 
+                   select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+#subsets data with all species with more than 1 individual tested
+App1c1thy <- subset(App1cthy, Total >1, 
+                    select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+#subsets data with all species with more than 5 individual tested
+App1c5thy <- subset(App1cthy, Total >5, 
+                    select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+#subsets data with all species with more than 10 individual tested
+App1c10thy <- subset(App1cthy, Total >10, 
+                     select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+#subsets data with all species with more than 20 individual tested
+App1c20thy <- subset(App1cthy, Total >20, 
+                     select = c(Order, spp, Total, Infected, propinf, `0.03`, `0.98`, `Distancebetween`,Bacterium))
+
+#part 2: create a column in each that contains the partition
+#some of them won't be used
+App1cb$cut<-"Full"
+App1cc$cut<-"Full"
+App1c1c$cut<-">1"
+App1cd$cut<-"Full"
+App1c1d$cut<-">1"
+App1c5d$cut<-">5"
+App1c10d$cut <-">10"
+App1c20d$cut<- ">20"
+App1cHe$cut<-"Full"
+App1c1He$cut<-">1"
+App1c5He$cut<-">5"
+App1c10He$cut <-">10"
+App1c20He$cut<- ">20"
+App1cHy$cut<-"Full"
+App1c1Hy$cut<-">1"
+App1c5Hy$cut<-">5"
+App1c10Hy$cut <-">10"
+App1c20Hy$cut<- ">20"
+App1cI$cut<-"Full"
+App1cL$cut<-"Full"
+App1c1L$cut<-">1"
+App1cN$cut<-"Full"
+App1cor$cut<-"Full"
+App1c1or$cut<-">1"
+App1cph$cut<-"Full"
+App1cps$cut<-"Full"
+App1cst$cut<-"Full"
+App1cthy$cut<-"Full"
+#now combine them all back together
+order_limitedc <- rbind(
+  App1cd,App1c1d,App1c5d,App1c10d,
+  App1c20d,App1cHe,App1c1He,App1c5He,
+  App1c10He,App1c20He,App1cHy,App1c1Hy,
+  App1c5Hy,App1c10Hy,App1c20Hy)
+
+#this one works as figure 2
+orderplotc <- ggplot(data=order_limitedc,aes(x=reorder(spp,propinf,mean),
+                                           y=propinf,
+                                           ymin=`0.03`,
+                                           ymax=`0.98`,
+                                           color=Order))
+ordergraphc <- orderplotc + geom_pointrange(alpha=0.4,size=0.1) +
+  facet_wrap(~factor(Order,levels=c("Diptera",
+                                    "Hemiptera",
+                                    "Hymenoptera")) + 
+               factor(cut,levels=c("Full",">1",">5",">10",">20")),
+             scales="free_x",ncol=5,nrow=6,
+             labeller=label_wrap_gen(multi_line = FALSE))+
+  ggtitle("Infection Frequency Within Species Among Orders With Cardinium")+
+  theme(plot.title=element_text(hjust=0.5,size=12),
+        axis.title.y=element_text(size=10),
+        axis.title.x=element_text(size=10),
+        axis.text.y=element_text(size=8),
+        strip.text.x = element_text(size=8),
+        axis.ticks=element_blank(),
+        axis.text.x= element_blank(), 
+        text=element_text(size=8),
+        legend.position="none") +
+  scale_y_continuous(name="Infection Frequency (Mean +/- 95% Credible Interval)", 
+                     breaks=c(0,0.5,1))+
+  scale_x_discrete(name="Species",breaks=NULL) +
+  scale_color_manual(values=c("gold3",
+                              "green4",
+                              "cyan3"))
+ggsave("Figure2c.tiff",plot=ordergraphc,width=171,height=150,units='mm',dpi=300)
+#stats on figure 2
+#finding the proportion below 0.5 for each order
+#first to find the number tested within each order
+
+print("Diptera")
+c<-sum(App1c5d$propinf<1)
+d<-sum(App1c5d$propinf<0.5)
+d/c
+print("Hemiptera")
+e<- sum(App1c5He$propinf<1)
+f<-sum(App1c5He$propinf<0.5)
+f/e
+print("Hymenoptera")
+g<-sum(App1c5Hy$propinf<1)
+h<-sum(App1c5Hy$propinf<0.5)
+h/g
+
+###################################################
+#################Second batch of models############
+###################################################
+m2c <- brm(Infected|trials(Total)~Order+(1|spp),data=App1c,family=binomial(link="logit"),
+           prior=c(prior(normal(0,2),class="Intercept"),
+                   prior(cauchy(0,1),class="sd"),
+                   prior(normal(0,2),class="b")),
+           chains=4,iter=4000)
+m2postc<-posterior_samples(m2c)
+m2margc<-marginal_effects(m2c,robust=FALSE)
+m2margc<-as.data.frame(m2margc$Order)
+
+#this will make a graph based on just the multilevel model
+m2pc<-ggplot()
+multi1c<- m2pc+geom_pointrange(data=m2margc,aes(x=Order,y=estimate__,ymin=lower__,ymax=upper__)) +
+  xlab("Order") +
+  theme(axis.text.x=element_text(size=8,angle=90),
+        axis.title.y=element_text(size=8)) +
+  ylab("Proportion of Individuals Infected (mean +/- 95% Credible Interval)") +
+  ylim(c(0,1))+
+  ggtitle("Multi-level model")
+#Everything below will recreate the results from sazama et al 2017 but for all orders
+#Archaeognatha will not run because there is only one sample
+#blattaria
+d3blat<-App1c[App1c$Order=="Blattaria",]
+d3blat<- as.data.frame(d3blat)
+d3blat$Infected <- as.integer(d3blat$Infected)
+d3blat$Total <- as.integer(d3blat$Total)
+m5.blat<-map2stan(
+  alist(
+    Infected~dbetabinom(Total,pbar,theta),
+    logit(pbar)<-a,
+    a~dnorm(0,3),
+    theta~dexp(1)
+  ),
+  data=d3blat,
+  constraints=list(theta="lower=0"),
+  start=list(theta=3),
+  warmup=2000,iter=4000,chains=4)
+plot(m5.blat)
+precis(m5.blat,prob=.95,depth=2)
+postblat<-extract.samples(m5.blat)
+p_blat<-mean(logistic(postblat$a))
+plow_blat<-quantile(logistic(postblat$a),prob=0.025)
+phigh_blat<-quantile(logistic(postblat$a),prob=0.975)
+t_blat<-mean(postblat$theta)
+list(c(1-pbeta(0.001,p_blat*t_blat,(1-p_blat)*t_blat),
+       1-pbeta(0.001,plow_blat*t_blat,(1-plow_blat)*t_blat),
+       1-pbeta(0.001,phigh_blat*t_blat,(1-phigh_blat)*t_blat)))
+####Coleoptera###
+#################################
+d3col<-App1c[App1c$Order=="Coleoptera",]
+d3col<- as.data.frame(d3col)
+d3col$Infected <- as.integer(d3col$Infected)
+d3col$Total <- as.integer(d3col$Total)
+m5.col<-map2stan(
+  alist(
+    Infected~dbetabinom(Total,pbar,theta),
+    logit(pbar)<-a,
+    a~dnorm(0,3),
+    theta~dexp(1)
+  ),
+  data=d3col,
+  constraints=list(theta="lower=0"),
+  start=list(theta=3),
+  warmup=2000,iter=4000,chains=4)
+plot(m5.col)
+precis(m5.col,prob=.95,depth=2)
+postcol<-extract.samples(m5.col)
+p_col<-mean(logistic(postcol$a))
+plow_col<-quantile(logistic(postcol$a),prob=0.025)
+phigh_col<-quantile(logistic(postcol$a),prob=0.975)
+t_col<-mean(postcol$theta)
+list(c(1-pbeta(0.001,p_col*t_col,(1-p_col)*t_col),
+       1-pbeta(0.001,plow_col*t_col,(1-plow_col)*t_col),
+       1-pbeta(0.001,phigh_col*t_col,(1-phigh_col)*t_col)))
+#Dermaptera
+#only one species
+#create dataframe from data in sazama et al 2017
+#diptera
+d3dip<-App1c[App1c$Order=="Diptera",]
+#if I need to do this just for aquatics then I need 
+#to subset the data further into aquatics only
+#d3dip<-d3dip[d3dip$AT=="aquatic",]
+d3dip<- as.data.frame(d3dip)
+d3dip$Infected <- as.integer(d3dip$Infected)
+d3dip$Total <- as.integer(d3dip$Total)
+m5.dip<-map2stan(
+  alist(
+    Infected~dbetabinom(Total,pbar,theta),
+    logit(pbar)<-a,
+    a~dnorm(0,3),
+    theta~dexp(1)
+  ),
+  data=d3dip,
+  constraints=list(theta="lower=0"),
+  start=list(theta=3),
+  warmup=2000,iter=4000,chains=4)
+plot(m5.dip)
+precis(m5.dip,prob=.95,depth=2)
+postdip<-extract.samples(m5.dip)
+p_dip<-mean(logistic(postdip$a))
+plow_dip<-quantile(logistic(postdip$a),prob=0.025)
+phigh_dip<-quantile(logistic(postdip$a),prob=0.975)
+t_dip<-mean(postdip$theta)
+list(c(1-pbeta(0.001,p_dip*t_dip,(1-p_dip)*t_dip),
+       1-pbeta(0.001,plow_dip*t_dip,(1-plow_dip)*t_dip),
+       1-pbeta(0.001,phigh_dip*t_dip,(1-phigh_dip)*t_dip)))
+
+quantile(logistic(postdip$a))
+####Ephemeroptera###
+#################################
+#no ephem
+####Hemiptera###
+#################################
+d3hem<-App1c[App1c$Order=="Hemiptera",]
+d3hem<- as.data.frame(d3hem)
+d3hem$Infected <- as.integer(d3hem$Infected)
+d3hem$Total <- as.integer(d3hem$Total)
+m5.hem<-map2stan(
+  alist(
+    Infected~dbetabinom(Total,pbar,theta),
+    logit(pbar)<-a,
+    a~dnorm(0,3),
+    theta~dexp(1)
+  ),
+  data=d3hem,
+  constraints=list(theta="lower=0"),
+  start=list(theta=3),
+  warmup=2000,iter=4000,chains=4)
+plot(m5.hem)
+precis(m5.hem,prob=.95,depth=2)
+posthem<-extract.samples(m5.hem)
+p_hem<-mean(logistic(posthem$a))
+plow_hem<-quantile(logistic(posthem$a),prob=0.025)
+phigh_hem<-quantile(logistic(posthem$a),prob=0.975)
+t_hem<-mean(posthem$theta)
+list(c(1-pbeta(0.001,p_hem*t_hem,(1-p_hem)*t_hem),
+       1-pbeta(0.001,plow_hem*t_hem,(1-plow_hem)*t_hem),
+       1-pbeta(0.001,phigh_hem*t_hem,(1-phigh_hem)*t_hem)))
+####Hymenoptera###
+#################################
+d3hym<-App1c[App1c$Order=="Hymenoptera",]
+d3hym<- as.data.frame(d3hym)
+d3hym$Infected <- as.integer(d3hym$Infected)
+d3hym$Total <- as.integer(d3hym$Total)
+m5.hym<-map2stan(
+  alist(
+    Infected~dbetabinom(Total,pbar,theta),
+    logit(pbar)<-a,
+    a~dnorm(0,3),
+    theta~dexp(1)
+  ),
+  data=d3hym,
+  constraints=list(theta="lower=0"),
+  start=list(theta=3),
+  warmup=2000,iter=4000,chains=4)
+plot(m5.hym)
+precis(m5.hym,prob=.95,depth=2)
+posthym<-extract.samples(m5.hym)
+p_hym<-mean(logistic(posthym$a))
+plow_hym<-quantile(logistic(posthym$a),prob=0.025)
+phigh_hym<-quantile(logistic(posthym$a),prob=0.975)
+theta<-mean(posthym$theta)
+list(c(1-pbeta(0.001,p_hym*theta,(1-p_hym)*theta),
+       1-pbeta(0.001,plow_hym*theta,(1-plow_hym)*theta),
+       1-pbeta(0.001,phigh_hym*theta,(1-phigh_hym)*theta)))
+####isoptera###
+#################################
+#only one species
+####Lepidoptera###
+#################################
+d3lep<-App1c[App1c$Order=="Lepidoptera",]
+d3lep<- as.data.frame(d3lep)
+d3lep$Infected <- as.integer(d3lep$Infected)
+d3lep$Total <- as.integer(d3lep$Total)
+m5.lep<-map2stan(
+  alist(
+    Infected~dbetabinom(Total,pbar,theta),
+    logit(pbar)<-a,
+    a~dnorm(0,3),
+    theta~dexp(1)
+  ),
+  data=d3lep,
+  constraints=list(theta="lower=0"),
+  start=list(theta=3),
+  warmup=2000,iter=4000,chains=4)
+plot(m5.lep)
+precis(m5.lep,prob=.95,depth=2)
+postlep<-extract.samples(m5.lep)
+p_lep<-mean(logistic(postlep$a))
+plow_lep<-quantile(logistic(postlep$a),prob=0.025)
+phigh_lep<-quantile(logistic(postlep$a),prob=0.975)
+t_lep<-mean(postlep$theta)
+list(c(1-pbeta(0.001,p_lep*t_lep,(1-p_lep)*t_lep),
+       1-pbeta(0.001,plow_lep*t_lep,(1-plow_lep)*t_lep),
+       1-pbeta(0.001,phigh_lep*t_lep,(1-phigh_lep)*t_lep)))
+####Mantodea###
+#################################
+#no mantodea
+####Mecoptera###
+#################################
+#only one individual and species so it won't work
+####Megaloptera###
+#################################
+#only one individual and species so it won't work
+####Neuroptera###
+#################################
+d3neu<-App1c[App1c$Order=="Neuroptera",]
+d3neu<- as.data.frame(d3neu)
+d3neu$Infected <- as.integer(d3neu$Infected)
+d3neu$Total <- as.integer(d3neu$Total)
+m5.neu<-map2stan(
+  alist(
+    Infected~dbetabinom(Total,pbar,theta),
+    logit(pbar)<-a,
+    a~dnorm(0,3),
+    theta~dexp(1)
+  ),
+  data=d3neu,
+  constraints=list(theta="lower=0"),
+  start=list(theta=3),
+  warmup=2000,iter=4000,chains=4)
+plot(m5.neu)
+precis(m5.neu,prob=.95,depth=2)
+postneu<-extract.samples(m5.neu)
+p_neu<-mean(logistic(postneu$a))
+plow_neu<-quantile(logistic(postneu$a),prob=0.025)
+phigh_neu<-quantile(logistic(postneu$a),prob=0.975)
+t_neu<-mean(postneu$theta)
+list(c(1-pbeta(0.001,p_neu*t_neu,(1-p_neu)*t_neu),
+       1-pbeta(0.001,plow_neu*t_neu,(1-plow_neu)*t_neu),
+       1-pbeta(0.001,phigh_neu*t_neu,(1-phigh_neu)*t_neu)))
+####Odonata###
+#################################
+#only 1 odonata
+####Orthoptera###
+#################################
+d3ort<-App1c[App1c$Order=="Orthoptera",]
+d3ort<- as.data.frame(d3ort)
+d3ort$Infected <- as.integer(d3ort$Infected)
+d3ort$Total <- as.integer(d3ort$Total)
+m5.ort<-map2stan(
+  alist(
+    Infected~dbetabinom(Total,pbar,theta),
+    logit(pbar)<-a,
+    a~dnorm(0,3),
+    theta~dexp(1)
+  ),
+  data=d3ort,
+  constraints=list(theta="lower=0"),
+  start=list(theta=3),
+  warmup=2000,iter=4000,chains=4)
+plot(m5.ort)
+precis(m5.ort,prob=.95,depth=2)
+postort<-extract.samples(m5.ort)
+p_ort<-mean(logistic(postort$a))
+plow_ort<-quantile(logistic(postort$a),prob=0.025)
+phigh_ort<-quantile(logistic(postort$a),prob=0.975)
+t_ort<-mean(postort$theta)
+list(c(1-pbeta(0.001,p_ort*t_ort,(1-p_ort)*t_ort),
+       1-pbeta(0.001,plow_ort*t_ort,(1-plow_ort)*t_ort),
+       1-pbeta(0.001,phigh_ort*t_ort,(1-phigh_ort)*t_ort)))
+####Phasmida###
+#################################
+d3pha<-App1c[App1c$Order=="Phasmida",]
+d3pha<- as.data.frame(d3pha)
+d3pha$Infected <- as.integer(d3pha$Infected)
+d3pha$Total <- as.integer(d3pha$Total)
+m5.pha<-map2stan(
+  alist(
+    Infected~dbetabinom(Total,pbar,theta),
+    logit(pbar)<-a,
+    a~dnorm(0,3),
+    theta~dexp(1)
+  ),
+  data=d3pha,
+  constraints=list(theta="lower=0"),
+  start=list(theta=3),
+  warmup=2000,iter=4000,chains=4)
+plot(m5.pha)
+precis(m5.pha,prob=.95,depth=2)
+postpha<-extract.samples(m5.pha)
+p_pha<-mean(logistic(postpha$a))
+plow_pha<-quantile(logistic(postpha$a),prob=0.025)
+phigh_pha<-quantile(logistic(postpha$a),prob=0.975)
+t_pha<-mean(postpha$theta)
+list(c(1-pbeta(0.001,p_pha*t_pha,(1-p_pha)*t_pha),
+       1-pbeta(0.001,plow_pha*t_pha,(1-plow_pha)*t_pha),
+       1-pbeta(0.001,phigh_pha*t_pha,(1-phigh_pha)*t_pha)))
+####Plecoptera###
+#################################
+#no plecoptera
+####psocodea###
+#################################
+d3pso<-App1c[App1c$Order=="Psocodea",]
+d3pso<- as.data.frame(d3pso)
+d3pso$Infected <- as.integer(d3pso$Infected)
+d3pso$Total <- as.integer(d3pso$Total)
+m5.pso<-map2stan(
+  alist(
+    Infected~dbetabinom(Total,pbar,theta),
+    logit(pbar)<-a,
+    a~dnorm(0,3),
+    theta~dexp(1)
+  ),
+  data=d3pso,
+  constraints=list(theta="lower=0"),
+  start=list(theta=3),
+  warmup=2000,iter=4000,chains=4)
+plot(m5.pso)
+precis(m5.pso,prob=.95,depth=2)
+postpso<-extract.samples(m5.pso)
+p_pso<-mean(logistic(postpso$a))
+plow_pso<-quantile(logistic(postpso$a),prob=0.025)
+phigh_pso<-quantile(logistic(postpso$a),prob=0.975)
+t_pso<-mean(postpso$theta)
+list(c(1-pbeta(0.001,p_pso*t_pso,(1-p_pso)*t_pso),
+       1-pbeta(0.001,plow_pso*t_pso,(1-plow_pso)*t_pso),
+       1-pbeta(0.001,phigh_pso*t_pso,(1-phigh_pso)*t_pso)))
+####raphidioptera###
+#################################
+#only one species
+####siphonaptera###
+#################################
+#no individuals for cardinium
+####Strepsiptera###
+#################################
+d3str<-App1c[App1c$Order=="Strepsiptera",]
+d3str<- as.data.frame(d3str)
+d3str$Infected <- as.integer(d3str$Infected)
+d3str$Total <- as.integer(d3str$Total)
+m5.str<-map2stan(
+  alist(
+    Infected~dbetabinom(Total,pbar,theta),
+    logit(pbar)<-a,
+    a~dnorm(0,3),
+    theta~dexp(1)
+  ),
+  data=d3str,
+  constraints=list(theta="lower=0"),
+  start=list(theta=3),
+  warmup=2000,iter=4000,chains=4)
+plot(m5.str)
+precis(m5.str,prob=.95,depth=2)
+poststr<-extract.samples(m5.str)
+p_str<-mean(logistic(poststr$a))
+plow_str<-quantile(logistic(poststr$a),prob=0.025)
+phigh_str<-quantile(logistic(poststr$a),prob=0.975)
+t_str<-mean(poststr$theta)
+list(c(1-pbeta(0.001,p_str*t_str,(1-p_str)*t_str),
+       1-pbeta(0.001,plow_str*t_str,(1-plow_str)*t_str),
+       1-pbeta(0.001,phigh_str*t_str,(1-phigh_str)*t_str)))
+####Thysanoptera###
+#################################
+d3thy<-App1c[App1c$Order=="Thysanoptera",]
+d3thy<- as.data.frame(d3thy)
+d3thy$Infected <- as.integer(d3thy$Infected)
+d3thy$Total <- as.integer(d3thy$Total)
+m5.thy<-map2stan(
+  alist(
+    Infected~dbetabinom(Total,pbar,theta),
+    logit(pbar)<-a,
+    a~dnorm(0,3),
+    theta~dexp(1)
+  ),
+  data=d3thy,
+  constraints=list(theta="lower=0"),
+  start=list(theta=3),
+  warmup=2000,iter=4000,chains=4)
+plot(m5.thy)
+precis(m5.thy,prob=.95,depth=2)
+postthy<-extract.samples(m5.thy)
+thy$order<-"Thysanoptera"
+thy$mean<-mean(logistic(postthy$a))
+thy$low<-quantile(logistic(postthy$a),prob=0.025)
+thy$high<-quantile(logistic(postthy$a),prob=0.975)
+t_thy<-mean(postthy$theta)
+list(c(1-pbeta(0.001,p_thy*t_thy,(1-p_thy)*t_thy),
+       1-pbeta(0.001,plow_thy*t_thy,(1-plow_thy)*t_thy),
+       1-pbeta(0.001,phigh_thy*t_thy,(1-phigh_thy)*t_thy)))
+####Trichoptera###
+#################################
+#none for trichoptera
+#make new dataframes with all the orders
+#Archaeognatha
+#nothing here
+#blattaria
+blat <- data.frame(Order = "Blattaria")
+blat$mean<-mean(logistic(postblat$a))
+blat$low<-quantile(logistic(postblat$a),prob=0.025)
+blat$high<-quantile(logistic(postblat$a),prob=0.975)
+blat$theta<- mean(postblat$theta)
+blat$mean2<-(1-pbeta(0.001,blat$mean*blat$theta,(1-blat$mean)*blat$theta))
+blat$low2 <- 1-pbeta(0.001,blat$low*blat$theta,(1-blat$low)*blat$theta)
+blat$high2 <- 1-pbeta(0.001,blat$high*blat$theta,(1-blat$high)*blat$theta)
+#coleoptera
+coleo <- data.frame(Order = "Coleoptera")
+coleo$mean<-mean(logistic(postcol$a))
+coleo$low<-quantile(logistic(postcol$a),prob=0.025)
+coleo$high<-quantile(logistic(postcol$a),prob=0.975)
+coleo$theta<- mean(postcol$theta)
+coleo$mean2<-(1-pbeta(0.001,coleo$mean*coleo$theta,(1-coleo$mean)*coleo$theta))
+coleo$low2 <- 1-pbeta(0.001,coleo$low*coleo$theta,(1-coleo$low)*coleo$theta)
+coleo$high2 <- 1-pbeta(0.001,coleo$high*coleo$theta,(1-coleo$high)*coleo$theta)
+#Diptera
+dip <- data.frame(Order = "Diptera")
+dip$mean<-mean(logistic(postdip$a))
+dip$low<-quantile(logistic(postdip$a),prob=0.025)
+dip$high<-quantile(logistic(postdip$a),prob=0.975)
+dip$theta<- mean(postdip$theta)
+dip$mean2<-(1-pbeta(0.001,dip$mean*dip$theta,(1-dip$mean)*dip$theta))
+dip$low2 <- 1-pbeta(0.001,dip$low*dip$theta,(1-dip$low)*dip$theta)
+dip$high2 <- 1-pbeta(0.001,dip$high*dip$theta,(1-dip$high)*dip$theta)
+#Hemiptera
+hem <- data.frame(Order = "Hemiptera")
+hem$mean<-mean(logistic(posthem$a))
+hem$low<-quantile(logistic(posthem$a),prob=0.025)
+hem$high<-quantile(logistic(posthem$a),prob=0.975)
+hem$theta<- mean(posthem$theta)
+hem$mean2<-(1-pbeta(0.001,hem$mean*hem$theta,(1-hem$mean)*hem$theta))
+hem$low2 <- 1-pbeta(0.001,hem$low*hem$theta,(1-hem$low)*hem$theta)
+hem$high2 <- 1-pbeta(0.001,hem$high*hem$theta,(1-hem$high)*hem$theta)
+#Hymenoptera
+hym <- data.frame(Order = "Hymenoptera")
+hym$mean<-mean(logistic(posthym$a))
+hym$low<-quantile(logistic(posthym$a),prob=0.025)
+hym$high<-quantile(logistic(posthym$a),prob=0.975)
+hym$theta<- mean(posthym$theta)
+hym$mean2<-(1-pbeta(0.001,hym$mean*hym$theta,(1-hym$mean)*hym$theta))
+hym$low2 <- 1-pbeta(0.001,hym$low*hym$theta,(1-hym$low)*hym$theta)
+hym$high2 <- 1-pbeta(0.001,hym$high*hym$theta,(1-hym$high)*hym$theta)
+#Lepidoptera
+lep <- data.frame(Order = "Lepidoptera")
+lep$mean<-mean(logistic(postlep$a))
+lep$low<-quantile(logistic(postlep$a),prob=0.025)
+lep$high<-quantile(logistic(postlep$a),prob=0.975)
+lep$theta<- mean(postlep$theta)
+lep$mean2<-(1-pbeta(0.001,lep$mean*lep$theta,(1-lep$mean)*lep$theta))
+lep$low2 <- 1-pbeta(0.001,lep$low*lep$theta,(1-lep$low)*lep$theta)
+lep$high2 <- 1-pbeta(0.001,lep$high*lep$theta,(1-lep$high)*lep$theta)
+#Neuroptera
+neu <- data.frame(Order = "Neuroptera")
+neu$mean<-mean(logistic(postneu$a))
+neu$low<-quantile(logistic(postneu$a),prob=0.025)
+neu$high<-quantile(logistic(postneu$a),prob=0.975)
+neu$theta<- mean(postneu$theta)
+neu$mean2<-(1-pbeta(0.001,neu$mean*neu$theta,(1-neu$mean)*neu$theta))
+neu$low2 <- 1-pbeta(0.001,neu$low*neu$theta,(1-neu$low)*neu$theta)
+neu$high2 <- 1-pbeta(0.001,neu$high*neu$theta,(1-neu$high)*neu$theta)
+#Orthoptera
+ort <- data.frame(Order = "Orthoptera")
+ort$mean<-mean(logistic(postort$a))
+ort$low<-quantile(logistic(postort$a),prob=0.025)
+ort$high<-quantile(logistic(postort$a),prob=0.975)
+ort$theta<- mean(postort$theta)
+ort$mean2<-(1-pbeta(0.001,ort$mean*ort$theta,(1-ort$mean)*ort$theta))
+ort$low2 <- 1-pbeta(0.001,ort$low*ort$theta,(1-ort$low)*ort$theta)
+ort$high2 <- 1-pbeta(0.001,ort$high*ort$theta,(1-ort$high)*ort$theta)
+#Phasmida
+pha <- data.frame(Order = "Phasmida")
+pha$mean<-mean(logistic(postpha$a))
+pha$low<-quantile(logistic(postpha$a),prob=0.025)
+pha$high<-quantile(logistic(postpha$a),prob=0.975)
+pha$theta<- mean(postpha$theta)
+pha$mean2<-(1-pbeta(0.001,pha$mean*pha$theta,(1-pha$mean)*pha$theta))
+pha$low2 <- 1-pbeta(0.001,pha$low*pha$theta,(1-pha$low)*pha$theta)
+pha$high2 <- 1-pbeta(0.001,pha$high*pha$theta,(1-pha$high)*pha$theta)
+#Psocodea
+pso <- data.frame(Order = "Psocodea")
+pso$mean<-mean(logistic(postpso$a))
+pso$low<-quantile(logistic(postpso$a),prob=0.025)
+pso$high<-quantile(logistic(postpso$a),prob=0.975)
+pso$theta<- mean(postpso$theta)
+pso$mean2<-(1-pbeta(0.001,pso$mean*pso$theta,(1-pso$mean)*pso$theta))
+pso$low2 <- 1-pbeta(0.001,pso$low*pso$theta,(1-pso$low)*pso$theta)
+pso$high2 <- 1-pbeta(0.001,pso$high*pso$theta,(1-pso$high)*pso$theta)
+#Strepsiptera
+str <- data.frame(Order = "Strepsiptera")
+str$mean<-mean(logistic(poststr$a))
+str$low<-quantile(logistic(poststr$a),prob=0.025)
+str$high<-quantile(logistic(poststr$a),prob=0.975)
+str$theta<- mean(poststr$theta)
+str$mean2<-(1-pbeta(0.001,str$mean*str$theta,(1-str$mean)*str$theta))
+str$low2 <- 1-pbeta(0.001,str$low*str$theta,(1-str$low)*str$theta)
+str$high2 <- 1-pbeta(0.001,str$high*str$theta,(1-str$high)*str$theta)
+#Thysanoptera
+thy <- data.frame(Order = "Thysanoptera")
+thy$mean<-mean(logistic(postthy$a))
+thy$low<-quantile(logistic(postthy$a),prob=0.025)
+thy$high<-quantile(logistic(postthy$a),prob=0.975)
+thy$theta<- mean(postthy$theta)
+thy$mean2<-(1-pbeta(0.001,thy$mean*thy$theta,(1-thy$mean)*thy$theta))
+thy$low2 <- 1-pbeta(0.001,thy$low*thy$theta,(1-thy$low)*thy$theta)
+thy$high2 <- 1-pbeta(0.001,thy$high*thy$theta,(1-thy$high)*thy$theta)
+
+blat <-as.data.frame(blat)
+coleo <-as.data.frame(coleo)
+dip<-as.data.frame(dip)
+hem<- as.data.frame(hem)
+hym <- as.data.frame(hym)
+lep<-as.data.frame(lep)
+neu<-as.data.frame(neu)
+ort<-as.data.frame(ort)
+pha<-as.data.frame(pha)
+pso<-as.data.frame(pso)
+str<-as.data.frame(str)
+thy<-as.data.frame(thy)
+#combines all data frames into one dataframe
+totaldfc <- rbind.data.frame(blat,coleo,
+                             dip,hem,hym,
+                             lep,neu,ort,pha,
+                             pso,str,thy)
+#multi level model plot with among species on top
+#Also adding an analyphs of the orders, but with only those with more than 5
+#individuals sampled
+m5c <- brm(Infected|trials(Total)~Order+(1|spp),data=App1c.5c,family=binomial(link="logit"),
+          prior=c(prior(normal(0,2),class="Intercept"),
+                  prior(cauchy(0,1),class="sd"),
+                  prior(normal(0,2),class="b")),
+          chains=4,iter=4000)
+m5postc<-posterior_samples(m5c)
+colmc<-mean(logistic(m5postc$b_Intercept+m5postc$b_OrderColeoptera))
+dermc<-mean(logistic(m5postc$b_Intercept+m5postc$b_OrderDermaptera))
+dipmc<-mean(logistic(m5postc$b_Intercept+m5postc$b_OrderDiptera))
+hemmc<-mean(logistic(m5postc$b_Intercept+m5postc$b_OrderHemiptera))
+hymmc<-mean(logistic(m5postc$b_Intercept+m5postc$b_OrderHymenoptera))
+lepmc<-mean(logistic(m5postc$b_Intercept+m5postc$b_OrderLepidoptera))
+manmc<-mean(logistic(m5postc$b_Intercept+m5postc$b_OrderMantodea))
+odomc<-mean(logistic(m5postc$b_Intercept+m5postc$b_OrderOdonata))
+ortmc<-mean(logistic(m5postc$b_Intercept+m5postc$b_OrderOrthoptera))
+
+bigonec<- rbind(colmc,dermc,dipmc,hemmc,
+               hymmc,lepmc,manmc,odomc,ortmc)
+bigonec<- as.data.frame(bigonec)
+bigonec$Order <- list("Coleoptera","Dermaptera","Diptera",
+                     "Hemiptera","Hymenoptera","Lepidoptera","Mantodea",
+                     "Odonata","Orthoptera")
+bigonec$Order<-as.character(bigonec$Order)
+colnames(bigonec)[colnames(bigonec)=="V1"] <- "mean"
+colcpi<- PI((logistic(m5postc$b_Intercept+m5postc$b_OrderColeoptera)),prob=0.95)
+dercpi<-PI(logistic(m5postc$b_Intercept+m5postc$b_OrderDermaptera),prob=0.95)
+dipcpi<-PI(logistic(m5postc$b_Intercept+m5postc$b_OrderDiptera),prob=0.95)
+hemcpi<-PI(logistic(m5postc$b_Intercept+m5postc$b_OrderHemiptera),prob=0.95)
+hymcpi<-PI(logistic(m5postc$b_Intercept+m5postc$b_OrderHymenoptera),prob=0.95)
+lepcpi<-PI(logistic(m5postc$b_Intercept+m5postc$b_OrderLepidoptera),prob=0.95)
+mancpi<-PI(logistic(m5postc$b_Intercept+m5postc$b_OrderMantodea),prob=0.95)
+odocpi<-PI(logistic(m5postc$b_Intercept+m5postc$b_OrderOdonata),prob=0.95)
+ortcpi<-PI(logistic(m5postc$b_Intercept+m5postc$b_OrderOrthoptera),prob=0.95)
+
+PIc <- rbind(colcpi,dercpi,dipcpi,hemcpi,hymcpi,
+            lepcpi,mancpi,odocpi,ortcpi)
+PIc<-as.data.frame(PIc)
+PIc$Order <- list("Coleoptera","Dermaptera","Diptera",
+                 "Hemiptera","Hymenoptera","Lepidoptera","Mantodea",
+                 "Odonata","Orthoptera")
+colnames(PIc)[colnames(PIc)=="3%"] <- "Lower"
+colnames(PIc)[colnames(PIc)=="98%"] <- "Upper"
+newbiec <- join(bigonec,PIc,by="Order",type="left",
+               match="first")
+#this will make a graph based on just the multilevel model
+#checking manual results
+cpc <- ggplot()
+combinedc <- cpc+geom_pointrange(data=m2margc,
+                                 position=position_nudge(-0.3),
+                                 mapping=aes(x=reorder(Order,-estimate__),
+                                             y=estimate__,
+                                             ymin=lower__,
+                                             ymax=upper__,
+                                             color="black"),
+                                 shape=17) +
+  theme(plot.title=element_text(size=10,face="italic"),
+        axis.text.x=element_text(size=8,angle=90),
+        axis.title.y=element_blank(),
+        axis.title.x=element_blank()) +
+  ylim(c(0,1))+
+  ggtitle("Cardinium") +
+  geom_pointrange(data=totaldfc,
+                  mapping=aes(x=Order,
+                              y=mean2,
+                              ymin=low2,
+                              ymax=high2,
+                              color="red"),
+                  shape=17)+
+  geom_pointrange(data=newbiec,position=position_nudge(0.3),
+                  mapping=aes(x=Order,y=mean,
+                              ymin=Lower,ymax=Upper,color="Gray30"),
+                  shape=17)+
+  scale_color_manual(values=c("black","Gray50","red"),
+                     name=NULL,
+                     labels=c("Multi-level Total",
+                              "Multi-level >5",
+                              "Among Species"))+
+  theme(legend.text=element_text(size=10))
+combinedc
+ggsave("Figure3c.tiff",plot=combinedc,
+       width=171,height=240,units='mm',dpi=300)
+#creating a graph with all 3 within species distributions
+all <- list(App1c,App1r,App1w)
+App1combined <- rbindlist(all,use.names=TRUE)
+App1combined <- App1combined %>%
+  select(spp,Class,Order,Family,
+         Genus,Species,Total,Infected,propinf,
+         `0.03`, `0.98`, `Distancebetween`,Bacterium) %>%
+  arrange(propinf)
+App1combined.5 <- subset(App1combined, Total >5, 
+                         select = c(Order, spp, Total,
+                                    Infected, propinf,
+                                    `0.03`, `0.98`, `Distancebetween`,
+                                    Bacterium))
+App1combined.5inf <- subset(App1combined.5,propinf >0.001,
+                            select = c(Order, spp, Total,
+                                       Infected, propinf,
+                                       `0.03`, `0.98`, `Distancebetween`,
+                                       Bacterium))
+
+cool <- ggplot(data=App1combined.5inf,aes(x=reorder(propinf,spp,mean),
+                                           y=propinf,
+                                           ymin=`0.03`,
+                                           ymax=`0.98`,
+                                           color=Bacterium))
+coolio <- cool + geom_pointrange(alpha=0.5,size=0.01) +
+  facet_wrap(~factor(Bacterium,levels=c("Wolbachia",
+                                    "Rickettsia",
+                                    "Cardinium")),
+             scales="free_x",ncol=3,nrow=1,
+             labeller=label_wrap_gen(multi_line = FALSE))+
+  ggtitle("Infection Frequency Within Species Among Orders")+
+  theme(plot.title=element_text(hjust=0.5),
+        axis.ticks=element_blank(),
+        axis.text.x= element_blank(), 
+        text=element_text(size=6),
+        legend.position="none") +
+  scale_y_continuous(name="Infection Frequency (Mean +/- 95% Credible Interval)", 
+                     breaks=c(0,0.5,1))+
+  scale_x_discrete(name="Species",breaks=NULL) +
+  scale_color_manual(values=c("#000000",
+                              "#000000",
+                              "#000000"))
+coolio
+ggsave("Figure1combined.tiff",plot=coolio,
+       width=171,height=60,units='mm',dpi=300)
+#This is the new supplemental 1 figure
+supcool <- ggplot(data=App1combined,aes(x=reorder(propinf,spp,mean),
+                                          y=propinf,
+                                          ymin=`0.03`,
+                                          ymax=`0.98`,
+                                          color=Bacterium))
+supcoolio <- supcool + geom_pointrange(alpha=0.3,size=0.01) +
+  facet_wrap(~factor(Bacterium,levels=c("Wolbachia",
+                                        "Rickettsia",
+                                        "Cardinium")),
+             scales="free_x",ncol=3,nrow=1,
+             labeller=label_wrap_gen(multi_line = FALSE))+
+  ggtitle("Infection Frequency Within Species Among Orders")+
+  theme(plot.title=element_text(hjust=0.5),
+        axis.ticks=element_blank(),
+        axis.text.x= element_blank(), 
+        text=element_text(size=6),
+        legend.position="none") +
+  scale_y_continuous(name="Infection Frequency (Mean +/- 95% Credible Interval)",
+                     breaks=c(0,0.5,1))+
+  scale_x_discrete(name="Species",breaks=NULL) +
+  scale_color_manual(values=c("#000000",
+                              "#000000",
+                              "#000000"))
+supcoolio
+ggsave("SupplementalFigure1combined.tiff",plot=supcoolio,width=171,height=60,units='mm',dpi=300)
+
+#This is the new figure 2
+Dipterafull <- rbind(App1rd,App1r1d,App1r5d,App1wd,App1w1d,App1w5d,
+                     App1cd,App1c1d,App1c5d)
+Dipterafull$Bacterium <- as.character(Dipterafull$Bacterium)
+dipfull <- ggplot(data=Dipterafull,aes(x=reorder(propinf,spp,mean),
+                                        y=propinf,
+                                        ymin=`0.03`,
+                                        ymax=`0.98`,
+                                        color=Bacterium))
+cooldiptera <- dipfull+ geom_pointrange(alpha=0.5,size=0.01) +
+  facet_wrap(factor(Bacterium,levels=c("Wolbachia",
+                                       "Rickettsia",
+                                       "Cardinium"))
+                    ~factor(cut,levels=c("Full",
+                                        ">1",
+                                        ">5")),
+             scales="free_x",ncol=3,nrow=3,
+             labeller=label_wrap_gen(multi_line = FALSE))+
+  ggtitle("Infection Frequency Within Species of Diptera Among Bacteria")+
+  theme(plot.title=element_text(hjust=0.5,size=12),
+        axis.title.y=element_text(size=10),
+        axis.title.x=element_text(size=10),
+        axis.text.y=element_text(size=8),
+        strip.text.x = element_text(size=8),
+        axis.ticks=element_blank(),
+        axis.text.x= element_blank(), 
+        text=element_text(size=8),
+        legend.position="none") +
+  scale_y_continuous(name="Infection Frequency (Mean +/- 95% Credible Interval)", 
+                     breaks=c(0,0.5,1))+
+  scale_x_discrete(name="Species",breaks=NULL) +
+  scale_color_manual(values=c("#000000",
+                              "#000000",
+                              "#000000"))
+ggsave("Figure2_Diptera.tiff",plot=cooldiptera,
+       width=171,height=150,units='mm',dpi=300)
+#New figure 3 with all combined
+yoda <- grid.arrange(
+  combinedw,combinedr,combinedc,
+  nrow=3,
+  top="Infection Within and Among Species Across Orders",
+  left="Infection Frequency (Mean +/- 95% Credible Interval)",
+  bottom="Order")
+yoda
+ggsave("Figure3full.tiff",plot=yoda,
+       width=171,height=240,units='mm',dpi=300)
+#Combined uncertainty plot
+Uncall1 <- ggplot(data=App1combined,
+               aes(x=Total,y=Distancebetween,color=Order)) +
+  geom_point(size=1)
+Uncertaintyall <- Uncall1 +
+  facet_wrap(~(factor(Bacterium,levels=c("Wolbachia",
+                                         "Rickettsia",
+                                         "Cardinium")))) +
+  ylim(c(0,1)) +
+  xlab("Number of Individuals Tested per Species") +
+  ylab("Width of the 95% Credible Interval")+
+  theme(legend.position=c(.87,.65),
+        legend.key.size = unit(2,"mm"),
+        legend.text=element_text(size=4),
+        legend.title= element_text(size=6),
+        plot.title=(element_text(size=8,hjust=0.5)),
+        axis.title.y = element_text(size=6),
+        axis.title.x = element_text(size=6)) +
+  ggtitle("Width of the Credible Interval as Tested Individuals Increases")
+Uncertaintyall
+ggsave("Uncertaintyall.tiff",plot=Uncertaintyall,
+       width=171,height=75,units='mm',dpi=300)
